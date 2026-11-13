@@ -583,9 +583,11 @@ public final class KokoroPhonemizer {
                 var maxId = 0
                 var maxVal: Float = -.infinity
                 if logits.dataType == .float16 {
-                    let lPtr = logits.dataPointer.assumingMemoryBound(to: Float16.self)
+                    let row = floatsFromFloat16(
+                        logits.dataPointer + lastOffset * MemoryLayout<UInt16>.stride,
+                        count: vocabSize)
                     for v in 0..<vocabSize {
-                        let val = Float(lPtr[lastOffset + v])
+                        let val = row[v]
                         if val > maxVal { maxVal = val; maxId = v }
                     }
                 } else {

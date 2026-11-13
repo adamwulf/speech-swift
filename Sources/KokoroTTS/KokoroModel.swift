@@ -76,7 +76,7 @@ class KokoroNetwork {
 
         let lengthSamples: Int
         if audioLen.dataType == .float16 {
-            lengthSamples = Int(Float(audioLen.dataPointer.assumingMemoryBound(to: Float16.self).pointee))
+            lengthSamples = Int(floatsFromFloat16(audioLen.dataPointer, count: 1)[0])
         } else if audioLen.dataType == .int32 {
             lengthSamples = Int(audioLen.dataPointer.assumingMemoryBound(to: Int32.self).pointee)
         } else {
