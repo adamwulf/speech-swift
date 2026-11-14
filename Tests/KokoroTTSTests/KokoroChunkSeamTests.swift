@@ -57,6 +57,62 @@ final class KokoroChunkSeamTests: XCTestCase {
         XCTAssertEqual(kept("feels off,", 1.2), 1600)
     }
 
+    // MARK: - Which ends of a piece are trimmed
+
+    private func keeps(_ previous: String?, _ text: String, final isFinal: Bool = false,
+                       speed: Float = 1.0) -> (leading: Int?, trailing: Int?) {
+        KokoroChunkSeams.keeps(previousText: previous, text: text, isFinal: isFinal,
+                               speed: speed, sampleRate: rate)
+    }
+
+    func testFirstPieceKeepsItsLeadIn() {
+        let k = keeps(nil, "So the next useful step is for you")
+        XCTAssertNil(k.leading)
+        XCTAssertEqual(k.trailing, 240)
+    }
+
+    func testMiddlePieceIsTrimmedByTheTextOnEachSide() {
+        // Leading from the word cut before it, trailing from its own clause end.
+        let k = keeps("So the next useful step is for you",
+                      "to run a few real conversations and tell me where it feels off,")
+        XCTAssertEqual(k.leading, 240)
+        XCTAssertEqual(k.trailing, 1920)
+        let faster = keeps("So the next useful step is for you", "to run a few", speed: 1.2)
+        XCTAssertEqual(faster.leading, 200)
+        XCTAssertEqual(faster.trailing, 200)
+    }
+
+    func testFinalPieceKeepsItsTail() {
+        let k = keeps("the voice still feels off,", "and I'll send that straight to an agent", final: true)
+        XCTAssertEqual(k.leading, 1920)
+        XCTAssertNil(k.trailing)
+    }
+
+    func testSentenceSeamKeepsTheModelsPause() {
+        let before = keeps("Please bring", "the budget report.")
+        XCTAssertEqual(before.leading, 240)
+        XCTAssertNil(before.trailing)
+        let after = keeps("the budget report.", "We start at nine")
+        XCTAssertNil(after.leading)
+        XCTAssertEqual(after.trailing, 240)
+    }
+
+    func testRetryPiecesAreTrimmedByTheirOwnText() {
+        // A chunk that overran is re-split; the cut between its pieces is a
+        // seam like any other, here after a clause mark.
+        let count: (String) -> Int = { 2 + $0.filter { $0 != " " }.count }
+        let pieces = KokoroTextChunker.splitForRetry(
+            "the old reports in the basement, because nobody could", countTokens: count,
+            minTokens: 6, maxTokens: 40)
+        XCTAssertEqual(pieces, ["the old reports in the basement,", "because nobody could"])
+        let first = keeps("They looked through", pieces[0])
+        XCTAssertEqual(first.leading, 240)
+        XCTAssertEqual(first.trailing, 1920)
+        let second = keeps(pieces[0], pieces[1], final: true)
+        XCTAssertEqual(second.leading, 1920)
+        XCTAssertNil(second.trailing)
+    }
+
     // MARK: - Trimming
 
     func testTrimCutsSilenceAroundSpeechToTheKeptAmount() {

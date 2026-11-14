@@ -79,7 +79,8 @@ public final class KokoroTTSModel {
     /// ends, then clauses, then evenly sized runs of words. Each chunk renders
     /// in one call and the audio is concatenated, so short text is a single
     /// call. Where a chunk ends inside a sentence, the silence at the seam is
-    /// cut to a word gap or a comma pause. A chunk whose speech would still
+    /// cut to about a gap between words, or after clause punctuation to less
+    /// than Kokoro's own comma pause. A chunk whose speech would still
     /// overrun the graph's output window is split again and rendered as two
     /// pieces.
     public func synthesize(
@@ -148,13 +149,11 @@ public final class KokoroTTSModel {
                 // A seam inside a sentence keeps only a word gap or a comma
                 // pause of silence. Both sides follow from the text before
                 // the seam, so a piece's tail is settled before it is emitted.
+                let keep = KokoroChunkSeams.keeps(
+                    previousText: previousText, text: piece.text, isFinal: isFinal,
+                    speed: speed, sampleRate: config.sampleRate)
                 var audio = KokoroChunkSeams.trim(
-                    piece.audio,
-                    keepLeading: previousText.flatMap {
-                        KokoroChunkSeams.keptSilence(after: $0, speed: speed, sampleRate: config.sampleRate)
-                    },
-                    keepTrailing: isFinal ? nil : KokoroChunkSeams.keptSilence(
-                        after: piece.text, speed: speed, sampleRate: config.sampleRate))
+                    piece.audio, keepLeading: keep.leading, keepTrailing: keep.trailing)
                 // A short fade-in keeps the seam between pieces click-free.
                 if previousText != nil { fadeIn(&audio) }
                 try onChunk(audio, isFinal)
