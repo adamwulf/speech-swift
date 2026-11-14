@@ -117,14 +117,15 @@ Each frame produces 600 audio samples at 24 kHz (25ms per frame).
 
 ## Long text
 
-The end-to-end graph takes 128 phoneme tokens but renders at most 5 s per pass, about 56 tokens at the models' speech rate (upstream Kokoro's, ~10.5 tokens/s). Text is split the way speech-core splits it on Android, and text within one chunk renders in a single call:
+The end-to-end graph takes 128 phoneme tokens but renders at most 5 s per pass, about 56 tokens at the models' speech rate (upstream Kokoro's, ~10.5 tokens/s). Text within one chunk renders in a single call; longer text is split into chunks:
 
-- Chunks are packed greedily up to 56 tokens, preferring sentence ends, then clause punctuation (`,` `;` `:`), then words, then characters for a single oversized word. Punctuation is a boundary only when whitespace or the end of the text follows it, so `3.5`, `1.000`, `z.B.` and `18:30` reach the phonemizer intact.
-- A last chunk under 12 tokens joins the previous one when the merged chunk stays within 64 tokens.
+- Sentences are packed greedily up to 56 tokens. A longer sentence splits at clause punctuation (`,` `;` `:`), and clauses are packed the same way. Punctuation is a boundary only when whitespace or the end of the text follows it, so `3.5`, `1.000`, `z.B.` and `18:30` reach the phonemizer intact. Up to here this matches speech-core's chunking on Android.
+- A sentence or clause still too long is cut between words into the fewest chunks the budget allows, of about even length. Among nearly balanced cuts (within about 9 tokens, one or two words, of the most even one), a cut just before a word that starts a phrase wins: a conjunction, relative word or common preposition such as `and`, `because`, `where`, `which`, `to`, `for`, `with` (English only). Only a single word too long for a chunk is cut between characters. This intentionally diverges from speech-core, which fills each chunk to the budget and can leave a stub of a word or two.
+- A chunk under 12 tokens joins a neighbour when the merged chunk stays within 56 tokens; the last chunk joins its predecessor within 64 tokens.
 - A chunk whose speech would reach the last 200 ms of the output window is split at its best sentence, clause or word boundary and rendered again, up to four times.
 - `synthesize` returns the chunks' audio concatenated. `generateStream` yields each chunk as soon as it is rendered, with `frameIndex` set to the chunk's first sample in the stream.
 
-A sentence longer than one chunk, about ten words without a comma, is split between words and gets a short pause there.
+Each chunk renders as a complete utterance, with about 250 ms of the graph's lead-in silence before it and about 500 ms of zeroed trailing artifacts after it. Where a chunk ends inside a sentence, the seam is trimmed so the gap matches what Kokoro leaves inside one chunk: about 20 ms after a cut between words and about 160 ms after `,` `;` `:` at speed 1, shorter at higher speeds. Silence is a 10 ms window under 0.002 RMS, so soft onsets and endings (h, f, s, th) are kept. Sentence ends keep the model's own pause. The pitch still resets at a seam, since each chunk is spoken as its own utterance.
 
 ## Phonemizer
 

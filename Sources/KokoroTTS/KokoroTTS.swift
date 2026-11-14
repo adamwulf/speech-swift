@@ -58,8 +58,10 @@ public final class KokoroTTSModel {
     /// speech-core profile. A merged chunk near the 128-token input would
     /// overrun the 5 s graph at this speech rate and render twice.
     static let chunkTokenHardCap = 64
-    /// A last chunk shorter than this merges into the previous one when the
-    /// hard cap allows it; very short utterances render unreliably.
+    /// A chunk shorter than this joins a neighbour when the budget allows it
+    /// (the last chunk joins its predecessor up to the hard cap), and no cut
+    /// between words makes one where the words allow it; very short
+    /// utterances render unreliably.
     static let minTailTokens = 12
     /// Pieces of an overflow retry never go below this many tokens.
     static let minRetryTokens = 6
@@ -74,10 +76,12 @@ public final class KokoroTTSModel {
     ///
     /// The text is split into chunks of up to 56 phoneme tokens, about what
     /// the 5 s graph holds at the models' speech rate, preferring sentence
-    /// ends, then clauses, then words. Each chunk renders in one call and the
-    /// audio is concatenated, so short text is a single call. A chunk whose
-    /// speech would still overrun the graph's output window is split again
-    /// and rendered as two pieces.
+    /// ends, then clauses, then evenly sized runs of words. Each chunk renders
+    /// in one call and the audio is concatenated, so short text is a single
+    /// call. Where a chunk ends inside a sentence, the silence at the seam is
+    /// cut to a word gap or a comma pause. A chunk whose speech would still
+    /// overrun the graph's output window is split again and rendered as two
+    /// pieces.
     public func synthesize(
         text: String,
         voice: String = "af_heart",
@@ -132,25 +136,36 @@ public final class KokoroTTSModel {
             try onChunk([], true)
             return
         }
-        var emitted = false
+        var previousText: String?
         for (index, chunk) in chunks.enumerated() {
             // An overflow retry can turn one chunk into several pieces; they
             // come back together, so the final piece is known when emitted.
             let pieces = try renderChunk(
                 chunk, network: network, style: styleVector, speed: speed,
                 tokenIds: tokenIds, depth: 0)
-            for (pieceIndex, var piece) in pieces.enumerated() {
-                // A short fade-in keeps the seam between pieces click-free.
-                if emitted { fadeIn(&piece) }
+            for (pieceIndex, piece) in pieces.enumerated() {
                 let isFinal = index == chunks.count - 1 && pieceIndex == pieces.count - 1
-                try onChunk(piece, isFinal)
-                emitted = true
+                // A seam inside a sentence keeps only a word gap or a comma
+                // pause of silence. Both sides follow from the text before
+                // the seam, so a piece's tail is settled before it is emitted.
+                var audio = KokoroChunkSeams.trim(
+                    piece.audio,
+                    keepLeading: previousText.flatMap {
+                        KokoroChunkSeams.keptSilence(after: $0, speed: speed, sampleRate: config.sampleRate)
+                    },
+                    keepTrailing: isFinal ? nil : KokoroChunkSeams.keptSilence(
+                        after: piece.text, speed: speed, sampleRate: config.sampleRate))
+                // A short fade-in keeps the seam between pieces click-free.
+                if previousText != nil { fadeIn(&audio) }
+                try onChunk(audio, isFinal)
+                previousText = piece.text
             }
         }
     }
 
     /// The chunks `text` renders as: packed to `chunkTokenBudget`, with a
-    /// short last chunk merged only within `chunkTokenHardCap`.
+    /// short chunk merged into a neighbour within the budget, or, for the
+    /// last chunk, within `chunkTokenHardCap`.
     static func chunkPlan(
         _ text: String,
         countTokens: (String) -> Int,
@@ -162,7 +177,8 @@ public final class KokoroTTSModel {
     }
 
     /// Renders one chunk, splitting it again while its speech would overrun
-    /// the graph's output window.
+    /// the graph's output window. Each piece comes back with its text, which
+    /// decides how the seams around it are trimmed.
     private func renderChunk(
         _ text: String,
         network: KokoroNetwork,
@@ -170,13 +186,13 @@ public final class KokoroTTSModel {
         speed: Float,
         tokenIds: (String) -> [Int],
         depth: Int
-    ) throws -> [[Float]] {
+    ) throws -> [(text: String, audio: [Float])] {
         let ids = tokenIds(text)
         let capacity = min(config.maxPhonemeLength, Self.inputSlots)
         var unsplit: [Float]?
         if ids.count <= capacity {
             let pass = try runModel(tokenIds: ids, network: network, style: style, speed: speed)
-            if !pass.overran { return [pass.audio] }
+            if !pass.overran { return [(text, pass.audio)] }
             unsplit = pass.audio
         }
         if depth < Self.maxRetryDepth, ids.count > Self.minRetryTokens * 2 {
@@ -193,9 +209,9 @@ public final class KokoroTTSModel {
             }
         }
         // No safe split exists: keep what one bounded pass produces.
-        if let unsplit { return [unsplit] }
+        if let unsplit { return [(text, unsplit)] }
         let clipped = Array(ids.prefix(capacity - 1)) + [phonemizer.eosId]
-        return [try runModel(tokenIds: clipped, network: network, style: style, speed: speed).audio]
+        return [(text, try runModel(tokenIds: clipped, network: network, style: style, speed: speed).audio)]
     }
 
     /// One pass of the end-to-end graph. `overran` is set when the predicted
