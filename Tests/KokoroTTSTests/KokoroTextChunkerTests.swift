@@ -2,9 +2,10 @@ import XCTest
 @testable import KokoroTTS
 
 /// The sentence, clause and retry cases mirror speech-core's
-/// `test_text_chunker.cpp`; cuts between words intentionally diverge from it
-/// (see `KokoroTextChunker`). Token counts use the same stand-in: one per
-/// non-space character plus two for BOS/EOS.
+/// `test_text_chunker.cpp`; cuts between words and the merging of short
+/// chunks intentionally diverge from it (see `KokoroTextChunker`). Token
+/// counts use the same stand-in: one per non-space character plus two for
+/// BOS/EOS.
 final class KokoroTextChunkerTests: XCTestCase {
 
     private func count(_ text: String) -> Int {
@@ -142,7 +143,8 @@ final class KokoroTextChunkerTests: XCTestCase {
         // A lone "a" costs two tokens but one in context, like Kokoro's "A"
         // (eI alone, ɐ in "A few"), and every space costs one. Calibrating on
         // the first pair alone read the space as free, so every run looked a
-        // token short per space and the search fell back to greedy filling.
+        // token short per space and the recounts settled on uneven pieces
+        // (18, 26, 26, 26, 21).
         let contextual: (String) -> Int = { text in
             let words = text.split(separator: " ")
             let letters = words.reduce(0) { sum, word in
@@ -182,6 +184,13 @@ final class KokoroTextChunkerTests: XCTestCase {
             "dddd eeee ffff gggg hhhh",
             "iiii jjjj kkkk llll mmm",
         ])
+    }
+
+    func testShortOpeningClauseJoinsAClauseThatFitsOnlyAlone() {
+        // The clause after "Okay," fits alone (26 tokens) but not with it
+        // (31), so "Okay," used to render as a 7-token chunk.
+        XCTAssertEqual(chunk("Okay, aaaa bbbb cccc dddd eeee ffff", budget: 30, hardCap: 30),
+                       ["Okay, aaaa bbbb", "cccc dddd eeee ffff"])
     }
 
     func testShortSentenceIsCutWithTheLongSentenceAfterIt() {
