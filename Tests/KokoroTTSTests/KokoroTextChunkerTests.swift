@@ -193,6 +193,29 @@ final class KokoroTextChunkerTests: XCTestCase {
                        ["Okay, aaaa bbbb", "cccc dddd eeee ffff"])
     }
 
+    func testShortClauseJoinsTheWordPieceBeforeIt() {
+        // The first clause is cut 18 + 19; "though," (9 tokens) fits on the
+        // second piece, so the clause after it, which fits alone (24) but not
+        // with "though," (31), stays whole instead of gaining a word cut.
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh, though, kkkk llll mmmm nnnn oooo pp"
+        XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
+            "aaaa bbbb cccc dddd",
+            "eeee ffff gggg hhhh, though,",
+            "kkkk llll mmmm nnnn oooo pp",
+        ])
+    }
+
+    func testShortSentenceJoinsThePieceBeforeIt() {
+        // "Okay." fits after the first sentence's second piece; the sentence
+        // after it fits alone and keeps the plan at three chunks.
+        let text = "aaaa bbbb cccc dddd eeee ffff ggg archive. Okay. kkkk llll mmmm nnnn oooo ppp."
+        XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
+            "aaaa bbbb cccc dddd",
+            "eeee ffff ggg archive. Okay.",
+            "kkkk llll mmmm nnnn oooo ppp.",
+        ])
+    }
+
     func testShortSentenceIsCutWithTheLongSentenceAfterIt() {
         let text = "Okay. aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmm"
         XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [

@@ -146,8 +146,8 @@ final class KokoroChunkSeamTests: XCTestCase {
         let hop = KokoroChunkSeams.hopSamples, window = KokoroChunkSeams.windowSamples
         let lead = emitted.map { leadingZeros($0.audio) }
         let tail = emitted.map { trailingZeros($0.audio) }
-        // First piece: the utterance's lead-in is left alone and not faded;
-        // its tail before a word cut is trimmed.
+        // First piece: the utterance's lead-in is left alone; its tail before
+        // a word cut is trimmed.
         XCTAssertEqual(lead[0], samples(ms: 300))
         XCTAssertEqual(emitted[0].audio[lead[0]], framed[samples(ms: 300)])
         XCTAssertTrue((word...(word + window)).contains(tail[0]), "\(tail[0])")
@@ -166,6 +166,20 @@ final class KokoroChunkSeamTests: XCTestCase {
         // Final piece: its tail ends the utterance and is left alone.
         XCTAssertTrue((word...(word + hop)).contains(lead[4]), "\(lead[4])")
         XCTAssertEqual(tail[4], samples(ms: 500))
+    }
+
+    func testEmitPiecesDoesNotFadeTheFirstPiece() throws {
+        // A first piece that starts on sound keeps its first samples.
+        let open = tone(ms: 300) + silence(ms: 500)
+        var emitted: [[Float]] = []
+        try KokoroTTSModel.emitPieces(
+            of: ["Hello there", "and welcome."], speed: 1.0, sampleRate: rate,
+            render: { [($0, open)] },
+            onChunk: { audio, _ in emitted.append(audio) })
+        XCTAssertEqual(emitted.count, 2)
+        XCTAssertNotEqual(open.first, 0)
+        XCTAssertEqual(emitted.first?.prefix(KokoroChunkSeams.hopSamples), open.prefix(KokoroChunkSeams.hopSamples))
+        XCTAssertEqual(emitted.last?.first, 0)
     }
 
     func testEmitPiecesWithNothingToSpeakYieldsOneEmptyFinalPiece() throws {

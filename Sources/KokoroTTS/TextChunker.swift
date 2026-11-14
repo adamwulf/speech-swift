@@ -19,15 +19,17 @@ import Foundation
 ///   among nearly balanced cuts, one just before a word that starts a phrase
 ///   ("and", "because", "where", "to", "with", ...) or just after clause or
 ///   sentence punctuation wins. A sentence or clause below the minimum size
-///   that cannot share a piece with the one after it is cut together with
-///   that one rather than left on its own. When the token estimate behind this
-///   search cannot settle on pieces that fit, the words are packed greedily
-///   as speech-core packs them.
+///   is cut together with the next unit when it can neither share a piece
+///   with it nor join the piece before it, rather than left on its own.
+///   When the token estimate behind this search cannot settle on pieces
+///   that fit, the words are packed greedily as speech-core packs them.
 /// - Short pieces. speech-core only merges a short last piece into the one
 ///   before it. Here any piece below the minimum size joins a neighbour
 ///   within the budget, one in the same sentence first.
 ///
-/// Sentence and clause boundaries still outrank any word cut.
+/// Sentence and clause boundaries still outrank any word cut, with one
+/// exception: a sentence or clause below the minimum size is not left on
+/// its own at one.
 enum KokoroTextChunker {
 
     /// Packs `text` into chunks of at most `maxTokens`. A chunk below
@@ -209,8 +211,10 @@ enum KokoroTextChunker {
     /// large on its own is refined: a sentence into clauses, a clause (or a
     /// sentence without clause punctuation) into balanced runs of words, a
     /// word into characters. Sentences or clauses packed so far that stay
-    /// below `minTokens` and cannot take the next unit in are refined
-    /// together with it instead of becoming a chunk of their own.
+    /// below `minTokens` are refined together with the next unit when they
+    /// can neither share a chunk with it nor join the chunk before them (or
+    /// when the next unit is too large on its own), instead of becoming a
+    /// chunk of their own.
     private static func pack(
         _ units: [String],
         level: Level,
@@ -228,10 +232,15 @@ enum KokoroTextChunker {
             }
             var unit = unit
             if !acc.isEmpty {
-                // Short text packed so far would become a chunk of its own:
-                // cut it together with the next unit instead, between words
-                // since the two are over budget together.
-                if level != .words, countTokens(acc) < minTokens {
+                // Short text packed so far would become a chunk of its own.
+                // When the chunk before it can take it in and the next unit
+                // fits alone, it is flushed and joins that chunk later
+                // (`mergeShortChunks`). Otherwise it is refined together with
+                // the next unit (at clauses, then words), since the two are
+                // over budget together.
+                let previousTakesIt = out.last.map { countTokens($0 + " " + acc) <= maxTokens } ?? false
+                if level != .words, countTokens(acc) < minTokens,
+                   countTokens(unit) > maxTokens || !previousTakesIt {
                     unit = candidate
                 } else {
                     out.append(acc)
