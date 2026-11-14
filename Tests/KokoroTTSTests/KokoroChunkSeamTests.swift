@@ -105,12 +105,81 @@ final class KokoroChunkSeamTests: XCTestCase {
             "the old reports in the basement, because nobody could", countTokens: count,
             minTokens: 6, maxTokens: 40)
         XCTAssertEqual(pieces, ["the old reports in the basement,", "because nobody could"])
+        guard pieces.count == 2 else { return }
         let first = keeps("They looked through", pieces[0])
         XCTAssertEqual(first.leading, 240)
         XCTAssertEqual(first.trailing, 1920)
         let second = keeps(pieces[0], pieces[1], final: true)
         XCTAssertEqual(second.leading, 1920)
         XCTAssertNil(second.trailing)
+    }
+
+    // MARK: - Emitting pieces
+
+    func testEmitPiecesTrimsEachSeamByThePieceTexts() throws {
+        let speech = tone(ms: 300)
+        let framed = silence(ms: 300) + speech + silence(ms: 500)
+        // Starts on sound, so the fade-in shows in its first sample.
+        let open = speech + silence(ms: 500)
+        let chunks = ["So the next step is for you", "to run a few real conversations,",
+                      "and tell me what feels off."]
+        // The middle and the last chunk come back as two retry pieces each.
+        let rendered: [String: [(text: String, audio: [Float])]] = [
+            chunks[0]: [(chunks[0], framed)],
+            chunks[1]: [("to run a few", open), ("real conversations,", framed)],
+            chunks[2]: [("and tell me", framed), ("what feels off.", framed)],
+        ]
+        var requested: [String] = []
+        var emitted: [(audio: [Float], isFinal: Bool)] = []
+        try KokoroTTSModel.emitPieces(
+            of: chunks, speed: 1.0, sampleRate: rate,
+            render: { chunk in
+                requested.append(chunk)
+                return rendered[chunk] ?? []
+            },
+            onChunk: { emitted.append(($0, $1)) })
+
+        XCTAssertEqual(requested, chunks)
+        XCTAssertEqual(emitted.map { $0.isFinal }, [false, false, false, false, true])
+        guard emitted.count == 5 else { return }
+        let word = 240, clause = 1920
+        let hop = KokoroChunkSeams.hopSamples, window = KokoroChunkSeams.windowSamples
+        let lead = emitted.map { leadingZeros($0.audio) }
+        let tail = emitted.map { trailingZeros($0.audio) }
+        // First piece: the utterance's lead-in is left alone and not faded;
+        // its tail before a word cut is trimmed.
+        XCTAssertEqual(lead[0], samples(ms: 300))
+        XCTAssertEqual(emitted[0].audio[lead[0]], framed[samples(ms: 300)])
+        XCTAssertTrue((word...(word + window)).contains(tail[0]), "\(tail[0])")
+        // First retry piece: faded in, and trimmed by its own text, a word
+        // cut, not by its chunk's clause end.
+        XCTAssertNotEqual(open.first, 0)
+        XCTAssertEqual(emitted[1].audio.first, 0)
+        XCTAssertTrue((word...(word + window)).contains(tail[1]), "\(tail[1])")
+        // Second retry piece: leading from the piece before it, trailing from
+        // its own clause end.
+        XCTAssertTrue((word...(word + hop)).contains(lead[2]), "\(lead[2])")
+        XCTAssertTrue((clause...(clause + window)).contains(tail[2]), "\(tail[2])")
+        // The last chunk's first piece follows a clause and is not final.
+        XCTAssertTrue((clause...(clause + hop)).contains(lead[3]), "\(lead[3])")
+        XCTAssertTrue((word...(word + window)).contains(tail[3]), "\(tail[3])")
+        // Final piece: its tail ends the utterance and is left alone.
+        XCTAssertTrue((word...(word + hop)).contains(lead[4]), "\(lead[4])")
+        XCTAssertEqual(tail[4], samples(ms: 500))
+    }
+
+    func testEmitPiecesWithNothingToSpeakYieldsOneEmptyFinalPiece() throws {
+        var emitted: [(audio: [Float], isFinal: Bool)] = []
+        try KokoroTTSModel.emitPieces(
+            of: [], speed: 1.0, sampleRate: rate,
+            render: { _ in
+                XCTFail("Nothing to render")
+                return []
+            },
+            onChunk: { emitted.append(($0, $1)) })
+        XCTAssertEqual(emitted.count, 1)
+        XCTAssertEqual(emitted.first?.audio, [])
+        XCTAssertEqual(emitted.first?.isFinal, true)
     }
 
     // MARK: - Trimming

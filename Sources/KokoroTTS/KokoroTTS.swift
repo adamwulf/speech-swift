@@ -133,6 +133,28 @@ public final class KokoroTTSModel {
             text, countTokens: { tokenIds($0).count },
             capacity: min(config.maxPhonemeLength, Self.inputSlots))
 
+        try Self.emitPieces(
+            of: chunks, speed: speed, sampleRate: config.sampleRate,
+            render: { chunk in
+                try self.renderChunk(
+                    chunk, network: network, style: styleVector, speed: speed,
+                    tokenIds: tokenIds, depth: 0)
+            },
+            onChunk: onChunk)
+    }
+
+    /// Renders `chunks` in order with `render` and hands each piece to
+    /// `onChunk`, trimming the silence at its seams and fading in every piece
+    /// after the first. `render` returns one chunk's pieces, several after an
+    /// overflow retry, each with its own text. Exactly one call, the last, has
+    /// `isFinal` set; no chunks yield one empty final piece.
+    static func emitPieces(
+        of chunks: [String],
+        speed: Float,
+        sampleRate: Int,
+        render: (String) throws -> [(text: String, audio: [Float])],
+        onChunk: ([Float], Bool) throws -> Void
+    ) throws {
         guard !chunks.isEmpty else {
             try onChunk([], true)
             return
@@ -141,21 +163,20 @@ public final class KokoroTTSModel {
         for (index, chunk) in chunks.enumerated() {
             // An overflow retry can turn one chunk into several pieces; they
             // come back together, so the final piece is known when emitted.
-            let pieces = try renderChunk(
-                chunk, network: network, style: styleVector, speed: speed,
-                tokenIds: tokenIds, depth: 0)
+            let pieces = try render(chunk)
             for (pieceIndex, piece) in pieces.enumerated() {
                 let isFinal = index == chunks.count - 1 && pieceIndex == pieces.count - 1
-                // A seam inside a sentence keeps only a word gap or a comma
-                // pause of silence. Both sides follow from the text before
-                // the seam, so a piece's tail is settled before it is emitted.
+                // A seam inside a sentence keeps about a gap between words, or
+                // after clause punctuation less than Kokoro's own comma pause.
+                // Both sides follow from the text before the seam, so a
+                // piece's tail is settled before it is emitted.
                 let keep = KokoroChunkSeams.keeps(
                     previousText: previousText, text: piece.text, isFinal: isFinal,
-                    speed: speed, sampleRate: config.sampleRate)
+                    speed: speed, sampleRate: sampleRate)
                 var audio = KokoroChunkSeams.trim(
                     piece.audio, keepLeading: keep.leading, keepTrailing: keep.trailing)
                 // A short fade-in keeps the seam between pieces click-free.
-                if previousText != nil { fadeIn(&audio) }
+                if previousText != nil { fadeIn(&audio, sampleRate: sampleRate) }
                 try onChunk(audio, isFinal)
                 previousText = piece.text
             }
@@ -301,8 +322,8 @@ public final class KokoroTTSModel {
     }
 
     /// 5 ms linear fade-in at the start of a piece that follows another.
-    private func fadeIn(_ audio: inout [Float]) {
-        let count = min(audio.count, config.sampleRate / 200)
+    static func fadeIn(_ audio: inout [Float], sampleRate: Int) {
+        let count = min(audio.count, sampleRate / 200)
         guard count >= 2 else { return }
         for i in 0..<count { audio[i] *= Float(i) / Float(count) }
     }
