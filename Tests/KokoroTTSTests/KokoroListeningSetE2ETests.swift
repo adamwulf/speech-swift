@@ -22,6 +22,10 @@ import AudioCommon
 ///   exports (`kokoro_eliza_{10,15}s_{fp32,fp16}.mlmodelc`) in one pass. The
 ///   fp16 graphs load with `.cpuOnly`, where they run fastest.
 ///
+/// The A/B set also renders FluidInference's `kokoro_21_5s` (downloaded) for
+/// comparison. `KOKORO_LISTENING_CONFIGS` (comma-separated config names)
+/// limits a run to those configurations.
+///
 /// Run with: KOKORO_LISTENING_DIR=/path swift test --filter E2EKokoroListeningSetTests
 final class E2EKokoroListeningSetTests: XCTestCase {
 
@@ -88,6 +92,7 @@ final class E2EKokoroListeningSetTests: XCTestCase {
             Config(name: "X3_eliza-5s-fp16", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuAndNeuralEngine, cacheDir: dir),
             Config(name: "X3c_eliza-5s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuOnly, cacheDir: dir),
             Config(name: "X4_eliza-5s-fp16_pad0", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuAndNeuralEngine, boundary: 0, cacheDir: dir),
+            Config(name: "H1_fluid-5s_ane", modelId: fluid, modelFile: "kokoro_21_5s", units: .cpuAndNeuralEngine),
         ]
     }
 
@@ -114,7 +119,10 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let bundle = env["KOKORO_AB_BUNDLE_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
         let long = env["KOKORO_LISTENING_SET"] == "long"
-        let configs = bundle.map { long ? Self.longConfigs($0) : Self.abConfigs($0) } ?? Self.warbleConfigs
+        let allConfigs = bundle.map { long ? Self.longConfigs($0) : Self.abConfigs($0) } ?? Self.warbleConfigs
+        // KOKORO_LISTENING_CONFIGS: comma-separated config names to render; default all.
+        let only = Set((env["KOKORO_LISTENING_CONFIGS"] ?? "").split(separator: ",").map(String.init))
+        let configs = only.isEmpty ? allConfigs : allConfigs.filter { only.contains($0.name) }
         let texts = bundle == nil ? Self.warbleTexts : (long ? Self.longTexts : Self.abTexts)
 
         var loadedKey: String?
