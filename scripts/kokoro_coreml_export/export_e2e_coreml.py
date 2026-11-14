@@ -147,6 +147,7 @@ SourceModuleHnNSF.forward = _srcmod_forward_nonoise
 
 # ---- padding-invariant AdaIN: masked channel-wise stats over valid frames ----
 AdaIN1d = ISTFT.AdaIN1d
+ADAIN_SCALE = 16.0  # [local change] keeps ((x - mean) / 16)^2 inside fp16's range
 
 def _adain_forward_masked(self, x, s):
     B, C, T = x.shape
@@ -155,10 +156,19 @@ def _adain_forward_masked(self, x, s):
         mean = x.mean(dim=2, keepdim=True)
         var = x.var(dim=2, unbiased=False, keepdim=True)
     else:
+        # [local change, not in eliza] fp16-safe masked statistics, the same
+        # values in exact arithmetic: means instead of sums (a sum over 24,001
+        # samples overflows fp16), divided by the valid fraction, and the
+        # variance taken on (x - mean) / 16 so its squares stay in range.
         m = _nearest_resample(fm, T)  # [1,1,T] valid/pad split
-        denom = m.sum(dim=2, keepdim=True).clamp(min=1.0)
-        mean = (x * m).sum(dim=2, keepdim=True) / denom
-        var = (((x - mean) ** 2) * m).sum(dim=2, keepdim=True) / denom
+        frac = m.mean(dim=2, keepdim=True).clamp(min=1.0 / float(int(x.shape[-1])))
+        mean = (x * m).mean(dim=2, keepdim=True) / frac
+        d = (x - mean) * (1.0 / ADAIN_SCALE)
+        var_s = ((d * d) * m).mean(dim=2, keepdim=True) / frac
+        x_norm = d / torch.sqrt(var_s + self.eps / (ADAIN_SCALE * ADAIN_SCALE))
+        h = self.fc(s).view(B, 2 * self.num_features, 1)
+        gamma, beta = torch.chunk(h, chunks=2, dim=1)
+        return (1.0 + gamma.expand(B, C, T)) * x_norm + beta.expand(B, C, T)
     x_norm = (x - mean) / torch.sqrt(var + self.eps)
     h = self.fc(s).view(B, 2 * self.num_features, 1)
     gamma, beta = torch.chunk(h, chunks=2, dim=1)
@@ -411,12 +421,46 @@ def _keep_fp16(op) -> bool:
     when any output is a rank-3 tensor with the 9-harmonic axis, which is the
     whole sine-source phase path (f0 x harmonics, rad, resampled and
     cumulative phase, sin, sine waves)."""
-    for out in op.outputs:
-        shape = getattr(out, "shape", None)
-        if shape is not None and len(shape) == 3 and NUM_HARMONICS in [d for d in shape if isinstance(d, int)]:
+    tensors = list(op.outputs) + [v for v in op.inputs.values() if hasattr(v, "shape")]
+    for t in tensors:
+        shape = getattr(t, "shape", None)
+        if shape is not None and len(shape) == 3 and FP32_AXES & {d for d in shape if isinstance(d, int)}:
             FP32_KEPT.append(op.op_type)
             return False
     return True
+
+
+# Rank-3 axes whose ops stay fp32: 9 = the harmonics of the phase path; 11 =
+# the STFT bins of the vocoder's source analysis and iSTFT (n_fft 20), added
+# with KOKORO_FP32_AXES=9,11.
+FP32_AXES = {int(a) for a in os.environ.get("KOKORO_FP32_AXES", str(NUM_HARMONICS)).split(",") if a}
+
+
+DEC_STATE = {"frames": 0, "in_decoder": False}
+
+
+def _keep_fp16_decoder_only(op) -> bool:
+    """fp16dec op selector [local change, not in eliza]: everything up to the
+    decoder input stays fp32 (BERT, the masked LSTMs, the duration head, the
+    F0/N predictor, the text encoder), so the decoder and vocoder alone run in
+    fp16, minus the phase path. The decoder input is the `asr = t_en @ aln`
+    matmul, output [1, 512, frames]; ops are visited in program order."""
+    if not DEC_STATE["in_decoder"]:
+        if op.op_type == "matmul":
+            for out in op.outputs:
+                shape = tuple(getattr(out, "shape", ()) or ())
+                if shape == (1, 512, DEC_STATE["frames"]):
+                    DEC_STATE["in_decoder"] = True
+        FP32_KEPT.append(op.op_type)
+        return False
+    if op.op_type in DEC_FP32_OPTYPES:
+        FP32_KEPT.append(op.op_type)
+        return False
+    return _keep_fp16(op)
+
+
+# Op types kept fp32 inside the decoder too, for bisecting fp16 overflow.
+DEC_FP32_OPTYPES = set(filter(None, os.environ.get("KOKORO_DEC_FP32_OPTYPES", "").split(",")))
 
 
 def _compute_precision(ct, precision):
@@ -424,6 +468,8 @@ def _compute_precision(ct, precision):
         return ct.precision.FLOAT32
     if precision == "fp16mix":
         return ct.transform.FP16ComputePrecision(op_selector=_keep_fp16)
+    if precision == "fp16dec":
+        return ct.transform.FP16ComputePrecision(op_selector=_keep_fp16_decoder_only)
     return ct.precision.FLOAT16
 
 
@@ -435,7 +481,12 @@ def main():
     ap.add_argument("--tokens", type=int, default=128)
     # fp16mix [local change, not in eliza]: fp16 everywhere except the sine
     # source's phase path, which needs more than fp16's 11 bits.
-    ap.add_argument("--precision", choices=["fp16", "fp32", "fp16mix"], default="fp32")
+    # fp16dec [local change, not in eliza]: fp32 up to the decoder input, fp16
+    # in the decoder and vocoder except the phase path.
+    ap.add_argument("--precision", choices=["fp16", "fp32", "fp16mix", "fp16dec"], default="fp32")
+    # [local change, not in eliza] save without loading: a first Neural Engine
+    # compile of an fp16 graph can take hours, and parity can run on CPU later.
+    ap.add_argument("--skip-load", action="store_true")
     ap.add_argument("--out", default=os.environ.get("KOKORO_COREML_OUT", "/tmp/kokoro-coreml-work/out"))
     args = ap.parse_args()
     bucket_frames = args.frames if args.frames > 0 else args.seconds * SR // SAMPLES_PER_FRAME
@@ -512,6 +563,8 @@ def main():
     with torch.no_grad():
         traced = torch.jit.trace(e2e, (ids, mask, ref_s, phases, speed), strict=False, check_trace=False)
     T = args.tokens
+    DEC_STATE["frames"] = bucket_frames
+    DEC_STATE["in_decoder"] = False
     print("[convert] ct.convert...")
     mlmodel = ct.convert(
         traced,
@@ -533,15 +586,20 @@ def main():
         # [local change, not in eliza] ALL makes coremltools load the model for
         # the GPU, which aborts in MPSGraph on macOS 27. Load-time only.
         compute_units=ct.ComputeUnit.CPU_AND_NE,
+        skip_model_load=args.skip_load,
     )
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     pkg = out / f"kokoro_{args.seconds}s.mlpackage"
     mlmodel.save(str(pkg))
     print(f"[saved] {pkg}")
-    if args.precision == "fp16mix":
+    if args.precision in ("fp16mix", "fp16dec"):
         from collections import Counter
-        print(f"[fp16mix] ops kept fp32: {len(FP32_KEPT)} {dict(Counter(FP32_KEPT))}")
+        print(f"[{args.precision}] ops kept fp32: {len(FP32_KEPT)} {dict(Counter(FP32_KEPT).most_common(12))}"
+              f" decoder_found={DEC_STATE['in_decoder']}")
+    if args.skip_load:
+        print("[done] saved without loading (--skip-load); run parity_coreml.py for parity")
+        return
 
     print("[parity] coreml vs torch...")
     pred = mlmodel.predict({
