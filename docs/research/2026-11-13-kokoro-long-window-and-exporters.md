@@ -185,8 +185,26 @@ Both graphs ran through `KokoroTTSModel` with `af_heart` at speed 1, using the s
 - **BOS / EOS = 0 instead of 1 / 2** lengthens speech by 5-40% on both graphs (for example "Yes." 0.85 to 1.20 s), and the two graphs again match each other.
 - **Speed:** about 385 ms per 5 s pass with `.cpuAndNeuralEngine`, the same with `.cpuOnly`, against 375 ms for `kokoro_5s`. The fp32 graph runs on the CPU.
 
+### Blind listening
+
+Each text was rendered by both graphs in two pairs, BOS / EOS 1 / 2 and BOS / EOS 0, and the files were shuffled under neutral names. Adam rated each pair:
+
+| Text | BOS / EOS 1 / 2 | BOS / EOS 0 |
+|---|---|---|
+| "Sure, I can do that." | export better | same |
+| 25-word sentence | export better | same |
+| "Yes." | same | export slightly better (both rough) |
+| "Hello there, how are you today?" | export way better | same |
+| Question | same | export way better |
+| Numbers and a time | same | same |
+| Commas | export slightly better | export way better |
+| Three sentences | export a bit better | export a bit better |
+
+The export was preferred in 9 of 16 pairs and tied in 7. `kokoro_5s` was not preferred in any. "Yes." sounded better with BOS / EOS 1 / 2 than with 0, so the runtime keeps sending 1 / 2.
+
+This passes Gate 2: the eliza exporter, with the three fixes above, is at least as good as `kokoro_5s` at the same 5 s window. The next step is the same export at 10 s and 15 s.
+
 ### Still open
 
-- Blind listening.
 - An fp16 build. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
