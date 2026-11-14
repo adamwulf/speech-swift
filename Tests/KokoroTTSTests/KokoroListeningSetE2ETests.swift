@@ -91,6 +91,12 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         var loadedKey: String?
         var model: KokoroTTSModel?
         for config in configs {
+            // A bundle folder need not hold every graph of the A/B set yet.
+            if let dir = config.cacheDir,
+               !FileManager.default.fileExists(atPath: dir.appendingPathComponent("\(config.modelFile).mlmodelc").path) {
+                print("LISTEN skip \(config.name): no \(config.modelFile).mlmodelc in \(dir.path)")
+                continue
+            }
             let key = "\(config.modelFile)-\(config.units.rawValue)"
             if key != loadedKey {
                 model = nil
