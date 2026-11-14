@@ -43,6 +43,12 @@ public final class KokoroTTSModel {
     var voices: [String: KokoroVoice]
     /// Chunk sizes for the loaded graph's input slots and output window.
     let chunkBudget: KokoroChunkBudget
+    /// Listening tests only: send this id in place of BOS and EOS (upstream
+    /// Kokoro uses 0 for both; the phonemizer emits 1 and 2).
+    var experimentBoundaryId: Int?
+    /// Listening tests only: use a voice's averaged `embedding` even when
+    /// its file has per-length rows.
+    var experimentAveragedVoice = false
 
     var _isLoaded: Bool { network != nil }
 
@@ -246,6 +252,11 @@ public final class KokoroTTSModel {
         voice: KokoroVoice,
         speed: Float
     ) throws -> (audio: [Float], overran: Bool) {
+        var tokenIds = tokenIds
+        if let boundary = experimentBoundaryId, tokenIds.count >= 2 {
+            tokenIds[0] = boundary
+            tokenIds[tokenIds.count - 1] = boundary
+        }
         let padTo = network.inputSlots
         let tokenCount = min(tokenIds.count, padTo)
         let paddedIds = phonemizer.pad(Array(tokenIds.prefix(padTo)), to: padTo)
@@ -254,7 +265,7 @@ public final class KokoroTTSModel {
         let maskArray = try createInt32Array(shape: [1, padTo], values: (0..<padTo).map { Int32($0 < tokenCount ? 1 : 0) })
         // BOS and EOS are not phonemes; the voice's per-length row, when it
         // has them, is picked by the phonemes between them.
-        let style = voice.style(phonemeCount: tokenCount - 2)
+        let style = experimentAveragedVoice ? voice.embedding : voice.style(phonemeCount: tokenCount - 2)
         let refS = try createFloatArray(shape: [1, config.styleDim], values: style)
         let speedArray = network.acceptsSpeed ? try createFloatArray(shape: [1], values: [speed]) : nil
 

@@ -19,6 +19,9 @@ class KokoroNetwork {
     /// Whether the graph takes a `speed` input. Graphs without one always
     /// speak at speed 1.
     let acceptsSpeed: Bool
+    /// Listening tests only: pass all-zero `random_phases` instead of
+    /// random ones, so renders are repeatable.
+    var experimentZeroPhases = false
 
     /// Load the end-to-end bundle `<modelFile>.mlmodelc` from `directory`.
     init(directory: URL, modelFile: String, computeUnits: MLComputeUnits = .all) throws {
@@ -67,7 +70,7 @@ class KokoroNetwork {
         speed: MLMultiArray? = nil
     ) throws -> E2EOutput {
         let randomPhases = try MLMultiArray(shape: [1, 9], dataType: .float32)
-        for i in 0..<9 { randomPhases[i] = NSNumber(value: Float.random(in: 0..<1)) }
+        for i in 0..<9 { randomPhases[i] = NSNumber(value: experimentZeroPhases ? 0 : Float.random(in: 0..<1)) }
 
         var dict: [String: MLFeatureValue] = [
             "input_ids": MLFeatureValue(multiArray: inputIds),
