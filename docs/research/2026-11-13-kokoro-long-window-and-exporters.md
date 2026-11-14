@@ -148,3 +148,45 @@ Other paths:
 
 - Ask soniqo for the Kokoro exporter in `speech-models`. That is the shortest route to a graph identical to `kokoro_5s` at 10 s and 15 s.
 - Port soniqo's two graph changes, the valid-length reversed LSTMs and the segmented phase sum, into the eliza exporter. The shipped `kokoro_5s` MIL is a complete reference for both.
+
+## 4. First 5 s export with the eliza exporter (2026-11-14)
+
+Steps 1-5 of [kokoro-e2e-5s-export-ab.md](../plans/kokoro-e2e-5s-export-ab.md) were run. The setup: Python 3.12, torch 2.5.0, coremltools 8.3.0, eliza `b2e30700`, mattmireles `2a75c780`, and hexgrad `kokoro-v1_0.pth`.
+
+### Fixes the exporter needed
+
+Three changes, all in the local copy of `export_e2e_coreml.py`:
+
+1. **The sine source converted to all zeros.** coremltools 8.3 converts `(f0 / sr) % 1` wrongly. A stage-by-stage comparison showed CoreML's `rad_values` with a mean of 1.6e-6 against torch's 0.748, and everything after it zero. With the sine source dead, the audio's spectral correlation with torch was 0.658. `x - torch.floor(x)` gives the same values, Python modulo semantics included, and converts correctly.
+2. **The masked AdaIN's frame mask came out one sample short.** It is stretched with `F.interpolate(mode="nearest")`, which converts to an integer-scale upsample: 24,000 samples instead of 24,001, and the conversion fails. A constant-index `index_select` reproduces PyTorch's nearest indices exactly; this was checked for 200, 400 and 600-frame masks at every decoder length.
+3. **Loading for the GPU aborts.** `ct.convert(compute_units=ALL)` loads the converted model for the GPU, which aborts inside MPSGraph on macOS 27 before the package is saved. `CPU_AND_NE` avoids it; this affects only loading in Python.
+
+### Parity
+
+- **Torch, masked against upstream** (24 random tokens): rounded durations identical (86 frames), STFT-magnitude correlation 0.979.
+- **CoreML fp32 against torch:** waveform correlation 0.998, MAE 0.00135. Durations match. The results are identical on `CPU_ONLY` and `CPU_AND_NE`.
+
+### A/B against `kokoro_5s`
+
+Both graphs ran through `KokoroTTSModel` with `af_heart` at speed 1, using the same chunking (56/64) and the same voice file. Each value is length / jitter / wobble, jitter and wobble in cents, averaged over 3 renders:
+
+| Text | `kokoro_5s` | eliza 5 s fp32 |
+|---|---|---|
+| "Sure, I can do that." | 1.93 s / 18.4 / 13.7 | 1.93 s / 21.3 / 15.6 |
+| 25-word sentence (4 chunks) | 8.12 s / 27.2 / 15.0 | 8.12 s / 27.2 / 16.8 |
+| "Yes." | 0.85 s / 33.6 / 13.1 | 0.85 s / 28.6 / 11.2 |
+| "Hello there, how are you today?" | 2.52 s / 27.2 / 11.7 | 2.52 s / 29.1 / 12.4 |
+| Question (2 chunks) | 4.38 s / 22.6 / 11.1 | 4.38 s / 22.3 / 10.8 |
+| Numbers and a time (3 chunks) | 7.08 s / 24.9 / 12.6 | 7.09 s / 24.7 / 12.0 |
+| Commas (2 chunks) | 5.86 s / 28.9 / 17.3 | 5.83 s / 29.7 / 17.4 |
+| Three sentences (5 chunks) | 11.34 s / 23.5 / 13.0 | 11.35 s / 23.9 / 12.5 |
+
+- **Durations** match `kokoro_5s` within one 25 ms frame per chunk, and so does the pitch behaviour. This is unlike FluidAudio's graphs, whose short-text jitter was 33 against 18.
+- **BOS / EOS = 0 instead of 1 / 2** lengthens speech by 5-40% on both graphs (for example "Yes." 0.85 to 1.20 s), and the two graphs again match each other.
+- **Speed:** about 385 ms per 5 s pass with `.cpuAndNeuralEngine`, the same with `.cpuOnly`, against 375 ms for `kokoro_5s`. The fp32 graph runs on the CPU.
+
+### Still open
+
+- Blind listening.
+- An fp16 build. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
+- An ASR round trip.

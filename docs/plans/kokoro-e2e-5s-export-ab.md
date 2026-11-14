@@ -42,11 +42,13 @@ Work in a folder outside the repository, for example `~/kokoro-export/`, with `s
    python -c "import torch, coremltools as ct; print(torch.__version__, ct.__version__)"
    ```
    These are the versions pinned by `mattmireles/kokoro-coreml`'s `requirements-export.txt`.
-2. Get mattmireles' Kokoro checkout (the exporter's `KOKORO_COREML_REF`) at a fixed commit:
+2. Get mattmireles' Kokoro checkout (the exporter's `KOKORO_COREML_REF`) at `2a75c780664b2ea0430eef6829c04f4704555623` (2026-06-14), the version eliza's exporter was written against. Later commits make `AdaIN1d` take a mask argument (from `6b043523c8`, 2026-09-14), which eliza's AdaIN patch does not accept.
    ```bash
-   git clone https://github.com/mattmireles/kokoro-coreml ~/kokoro-export/src/kokoro-coreml
-   git checkout b23caa862f0585c2c65187d0fc97e0f8311041dc   # run inside that clone
+   gh api repos/mattmireles/kokoro-coreml/tarball/2a75c780664b2ea0430eef6829c04f4704555623 > kokoro-coreml-2a75c78.tar.gz
+   mkdir -p ~/kokoro-export/src/kokoro-coreml-2a75c78
+   tar -xzf kokoro-coreml-2a75c78.tar.gz -C ~/kokoro-export/src/kokoro-coreml-2a75c78 --strip-components 1
    ```
+   At that commit, `checkpoints/config.json` and `checkpoints/kokoro-v1_0.pth` are symlinks into the author's home folder; delete them before step 5 copies the real files in.
 3. Get the eliza exporter files at a fixed commit (folder `packages/training/scripts/kokoro/coreml/` at `b2e30700d0b9a63e5e478505b6ddd28cd4fa8bc3`):
    - `export_e2e_coreml.py`
    - `validate_e2e_coreml.py`
@@ -54,7 +56,10 @@ Work in a folder outside the repository, for example `~/kokoro-export/`, with `s
    - `custom_stft.coreml.patch`
 
    For example: `curl -L -o export_e2e_coreml.py https://raw.githubusercontent.com/elizaOS/eliza/b2e30700d0b9a63e5e478505b6ddd28cd4fa8bc3/packages/training/scripts/kokoro/coreml/export_e2e_coreml.py`.
-4. Check whether `src/kokoro-coreml/kokoro/custom_stft.py` already replaces the `correction_mask` boolean scatter with a float blend. If it does not, apply `custom_stft.coreml.patch`; its paths are written as `ref/kokoro/custom_stft.py`.
+4. Apply `custom_stft.coreml.patch` to the checkout's `kokoro/custom_stft.py` (it replaces the `correction_mask` boolean scatter with a float blend; its paths are written as `ref/kokoro/custom_stft.py`). Then make three changes to the local copy of `export_e2e_coreml.py`, needed with coremltools 8.3 on macOS 27 (see the research notes, section 4):
+   - In `_f02sine_injected`, replace `(f0_values / self.sampling_rate) % 1` with `x - torch.floor(x)`. The `%` converts wrongly, and the sine source comes out all zero.
+   - In `_adain_forward_masked`, replace `F.interpolate(fm, size=T, mode="nearest")` with a nearest resample by constant `index_select` indices. The interpolate converts to an integer-scale upsample, 24,000 samples long instead of 24,001.
+   - Pass `compute_units=ct.ComputeUnit.CPU_AND_NE` to `ct.convert`. `ALL` makes coremltools load the model for the GPU, which aborts on macOS 27.
 5. Download the upstream weights and place them where the exporter looks:
    ```bash
    huggingface-cli download hexgrad/Kokoro-82M --local-dir ~/kokoro-export/weights/kokoro-82m
