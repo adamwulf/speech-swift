@@ -204,7 +204,15 @@ The export was preferred in 9 of 16 pairs and tied in 7. `kokoro_5s` was not pre
 
 This passes Gate 2: the eliza exporter, with the three fixes above, is at least as good as `kokoro_5s` at the same 5 s window. The next step is the same export at 10 s and 15 s.
 
+### Publishing (staged, not uploaded)
+
+The fp32 export is staged for Hugging Face as `milestonemade/Kokoro-82M-CoreML-Masked`. The model is renamed `kokoro_masked_5s.mlmodelc`, and the folder is laid out like aufklarer/Kokoro-82M-CoreML: the same vocabulary, dictionaries, G2P and 54 voices. It adds a model card with the A/B results and provenance, plus an `export/` folder holding the patched exporter (with eliza's MIT license), the patches and the parity script. `scripts/kokoro_coreml_export/` in this repository holds the same recipe. Once uploaded, the model loads with `fromPretrained(modelId: "milestonemade/Kokoro-82M-CoreML-Masked", modelFile: "kokoro_masked_5s")`.
+
+### fp16 (in progress)
+
+`--precision fp16mix` keeps the harmonic source's phase path in fp32 and makes the rest fp16, as soniqo's `kokoro_5s` does: its phase tensors are fp32 too. Loading the converted model for CPU and Neural Engine takes the Neural Engine compiler more than 30 minutes; the fp32 graph never invoked it. Next come parity, CPU-only against CPU + Neural Engine timing, and a blind A/B against `kokoro_5s`.
+
 ### Still open
 
-- An fp16 build. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
+- The fp16 build (above). The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
