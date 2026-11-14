@@ -18,6 +18,7 @@ Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSMo
 | `diag_sinegen.py` | Inside the harmonic source: rad, resampled and cumulative phase, sin, sine waves, voiced mask |
 | `check_nearest.py` | Confirms the constant-index nearest resample equals `F.interpolate(mode="nearest")` |
 | `make_blind_set.py` | Shuffles A/B WAV pairs under neutral names, with a separate key |
+| `noise_floor.py` | Lead-in and quietest-window RMS of rendered WAVs, in dBFS |
 
 ## The local changes
 

@@ -208,11 +208,41 @@ This passes Gate 2: the eliza exporter, with the three fixes above, is at least 
 
 The fp32 export is staged for Hugging Face as `milestonemade/Kokoro-82M-CoreML-Masked`. The model is renamed `kokoro_masked_5s.mlmodelc`, and the folder is laid out like aufklarer/Kokoro-82M-CoreML: the same vocabulary, dictionaries, G2P and 54 voices. It adds a model card with the A/B results and provenance, plus an `export/` folder holding the patched exporter (with eliza's MIT license), the patches and the parity script. `scripts/kokoro_coreml_export/` in this repository holds the same recipe. Once uploaded, the model loads with `fromPretrained(modelId: "milestonemade/Kokoro-82M-CoreML-Masked", modelFile: "kokoro_masked_5s")`.
 
-### fp16 (in progress)
+### fp16 (2026-11-14)
 
-`--precision fp16mix` keeps the harmonic source's phase path in fp32 and makes the rest fp16, as soniqo's `kokoro_5s` does: its phase tensors are fp32 too. Loading the converted model for CPU and Neural Engine takes the Neural Engine compiler more than 30 minutes; the fp32 graph never invoked it. Next come parity, CPU-only against CPU + Neural Engine timing, and a blind A/B against `kokoro_5s`.
+**First attempt: fp16 everywhere but the phase path (`fp16mix`).** It did not work:
+
+- Loading it for CPU and Neural Engine took the Neural Engine compiler about 110 minutes; the fp32 graph never invokes it.
+- On the Neural Engine its durations came out wrong: 66 frames where torch predicts 86.
+- On the CPU every duration came out 0 and the audio NaN.
+
+So fp16 breaks the text side: ALBERT, the masked LSTMs and the duration head.
+
+**Second attempt: fp16 in the decoder only (`fp16dec`).** Everything up to the decoder input stays fp32, and the decoder and vocoder run in fp16, except the phase path and the vocoder's STFT bins. Durations matched, but the audio went NaN. `diag_decoder.py` traced the NaN to the masked AdaIN at the vocoder's 24,001-sample stage: its statistics summed over every sample, and the sum overflowed fp16.
+
+**The fix.** Rewriting those statistics as means over the valid fraction, with the variance taken on `(x - mean) / 16`, keeps the same math inside fp16's range. With it:
+
+- CoreML matches torch: spectral correlation 0.9956 (waveform 0.943), the same durations, no NaN.
+- CPU-only, a 5 s pass takes about 200 ms. That is the fastest graph measured: `kokoro_5s` took about 260 ms and the fp32 export about 270 ms in the same run, both on the CPU.
+
+Results of the listening-set run (`E2EKokoroListeningSetTests`, same eight texts):
+
+| | ms per 5 s pass | Notes |
+|---|---|---|
+| `kokoro_5s` | ~260 | |
+| eliza fp32 | ~270 | |
+| eliza fp16dec, `.cpuOnly` | ~200 | noise floor in silences about -55 dBFS |
+| eliza fp16dec, `.cpuAndNeuralEngine` | ~995 | about 70 min first Neural Engine compile; noise floor about -73 dBFS |
+
+- **The Neural Engine is slower here, not faster.** The graph alternates between fp32 parts on the CPU (the text side, the phase path, the STFT in the middle of the vocoder) and fp16 parts on the Neural Engine. The handoffs cost more than the Neural Engine saves, and the first compile takes over an hour. This graph structure, one fused graph with thousands of unrolled LSTM ops, does not suit the Neural Engine.
+- **soniqo's `kokoro_5s` is fp32-typed almost throughout,** and runs at the fp32 export's speed, so it too runs mainly on the CPU.
+- **fp16 on the CPU leaves a noise floor of about -55 dBFS in silences,** against -73 to -78 dBFS for the others. On the Neural Engine, fp16 shows no such floor, so this is presumably the CPU's fp16 accumulation. The floor sits at the seam trimmer's threshold (0.002 RMS, -54 dBFS), so seams inside a sentence are not trimmed and multi-chunk renders come out 0.2-0.6 s longer. It may also be audible as faint hiss in pauses.
+
+A blind set compares `kokoro_5s` with fp16dec on the CPU and with fp16dec on the Neural Engine, 8 texts each.
 
 ### Still open
 
-- The fp16 build (above). The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
+- The fp16 blind listening.
+- If the CPU fp16 noise floor is audible: keep the vocoder's last stage (the 24,001-sample convolutions) in fp32, or lower the seam trimmer's threshold for this graph.
+- Neural Engine use would need a different graph structure, such as a split pipeline like mattmireles/kokoro-coreml's. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
