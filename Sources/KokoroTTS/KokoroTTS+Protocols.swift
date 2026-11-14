@@ -6,7 +6,7 @@ extension KokoroTTSModel: SpeechGenerationModel {
     /// The bundle's default voice: `af_heart` when present, otherwise the
     /// bundle's single voice (the German bundles ship one voice each).
     public var defaultBundleVoice: String {
-        voiceEmbeddings[Self.defaultVoice] != nil ? Self.defaultVoice : (availableVoices.first ?? Self.defaultVoice)
+        voices[Self.defaultVoice] != nil ? Self.defaultVoice : (availableVoices.first ?? Self.defaultVoice)
     }
 
     public func generate(text: String, language: String?) async throws -> [Float] {

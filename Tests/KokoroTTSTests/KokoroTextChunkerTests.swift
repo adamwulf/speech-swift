@@ -69,7 +69,7 @@ final class KokoroTextChunkerTests: XCTestCase {
             "because nobody could remember where the original drawings",
             "for the north wing of the building had been stored after the move.",
         ])
-        for piece in plan { XCTAssertLessThanOrEqual(count(piece), KokoroTTSModel.chunkTokenBudget) }
+        for piece in plan { XCTAssertLessThanOrEqual(count(piece), KokoroChunkBudget.fiveSecond.budget) }
     }
 
     // MARK: - Cuts between words

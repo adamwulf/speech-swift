@@ -117,15 +117,59 @@ Each frame produces 600 audio samples at 24 kHz (25ms per frame).
 
 ## Long text
 
-The end-to-end graph takes 128 phoneme tokens but renders at most 5 s per pass, about 56 tokens at the models' speech rate (upstream Kokoro's, ~10.5 tokens/s). Text within one chunk renders in a single call; longer text is split into chunks:
+An end-to-end graph renders a bounded output window per pass, so each graph has a chunk budget: the most phoneme tokens one chunk may hold. The default `kokoro_5s` graph takes 128 phoneme tokens but renders at most 5 s, which holds about 56 tokens. The budget is derived from the loaded graph: its window, less the 200 ms tail guard and about 750 ms of lead-in and trailing silence, is its speech time, and speech-core's validated 5 s profile (56 tokens, hard cap 64, for 4.05 s of speech) is scaled to it and capped by the graph's phoneme slots:
 
-- Sentences are packed greedily up to 56 tokens. A longer sentence splits at clause punctuation (`,` `;` `:`), and clauses are packed the same way. Punctuation is a boundary only when whitespace or the end of the text follows it, so `3.5`, `1.000`, `z.B.` and `18:30` reach the phonemizer intact. These packing rules are speech-core's (its chunking on Android); the two rules below diverge from it, so the resulting plans can differ.
+| Graph | Phoneme slots | Output window | Budget | Hard cap |
+|---|---|---|---|---|
+| `kokoro_5s` | 128 | 120 000 samples (5.0 s) | 56 | 64 |
+| `kokoro_21_15s` | 249 | 372 600 samples (15.5 s) | 201 | 230 |
+
+Text within one chunk renders in a single call; longer text is split into chunks:
+
+- Sentences are packed greedily up to the budget. A longer sentence splits at clause punctuation (`,` `;` `:`), and clauses are packed the same way. Punctuation is a boundary only when whitespace or the end of the text follows it, so `3.5`, `1.000`, `z.B.` and `18:30` reach the phonemizer intact. These packing rules are speech-core's (its chunking on Android); the two rules below diverge from it, so the resulting plans can differ.
 - A sentence or clause still too long is cut between words into the fewest chunks the budget allows, of about even length. Among nearly balanced cuts (within about 9 tokens, one or two words, of the most even one), a cut just before a word that starts a phrase wins: a conjunction, relative word or common preposition such as `and`, `because`, `where`, `which`, `to`, `for`, `with` (English only), or a cut right after clause or sentence punctuation. A sentence or clause under 12 tokens is cut together with the next one when it can neither share a chunk with it nor join the chunk before it, or when the next one is too long for a chunk on its own, rather than left on its own. Only a single word too long for a chunk is cut between characters. This intentionally diverges from speech-core, which fills each chunk to the budget and can leave a stub of a word or two. If the token estimate behind this search cannot settle on chunks that fit, the words are packed greedily as speech-core packs them.
-- A chunk under 12 tokens joins a neighbour when the merged chunk stays within 56 tokens, a neighbour in the same sentence first; the last chunk joins its predecessor within 64 tokens. speech-core only merges a short last chunk, so this also diverges from it.
+- A chunk under 12 tokens joins a neighbour when the merged chunk stays within the budget, a neighbour in the same sentence first; the last chunk joins its predecessor within the hard cap. speech-core only merges a short last chunk, so this also diverges from it.
 - A chunk whose speech would reach the last 200 ms of the output window is split at its best sentence, clause or word boundary and rendered again, up to four times.
 - `synthesize` returns the chunks' audio concatenated. `generateStream` yields each chunk as soon as it is rendered, with `frameIndex` set to the chunk's first sample in the stream.
 
 Each chunk renders as a complete utterance, with about 250 ms of the graph's lead-in silence before it and about 500 ms of zeroed trailing artifacts after it. Where a chunk ends inside a sentence, the seam is trimmed: to about 20 ms after a cut between words, in line with the gaps between words inside one chunk (most have none), and to about 160 ms after `,` `;` `:`, kept shorter than Kokoro's own comma pause inside one chunk (measured at 210-275 ms at speed 1). Both shrink at higher speeds. The trim counts a 10 ms window under 0.002 RMS as silence, below the level of soft onsets and endings (h, f, s, th), so the trim itself does not cut into them. Sentence ends keep the model's own pause. The pitch still resets at a seam, since each chunk is spoken as its own utterance.
+
+## Other end-to-end bundles
+
+`fromPretrained(modelFile:)` names the end-to-end bundle to download and load, without `.mlmodelc`. It defaults to `kokoro_5s`, which every `aufklarer/Kokoro-82M-*` repo ships. Any bundle with the same inputs (`input_ids`, `attention_mask`, `ref_s`, `random_phases`, optionally `speed`) and outputs (`audio`, `audio_length_samples`, `pred_dur`) loads the same way; its phoneme slots, output window, and whether it takes `speed` are read from the model, and the chunk budget follows from them.
+
+FluidAudio's 15 s bundle renders a sentence of up to 201 tokens in one pass:
+
+```swift
+let tts = try await KokoroTTSModel.fromPretrained(
+    modelId: "FluidInference/kokoro-82m-coreml",
+    modelFile: "kokoro_21_15s",
+    voiceFilter: ["a*", "b*"])   // American and British English voices only
+```
+
+| | `kokoro_5s` (aufklarer) | `kokoro_21_15s` (FluidInference) |
+|---|---|---|
+| `input_ids` | [1, 128] | [1, 249] |
+| `audio` | [1, 1, 120000] | [1, 1, 372600] |
+| `speed` input | yes | no: always speed 1 |
+| Voice files | `embedding` only (~5.5 KB) | `embedding` + 510 per-length rows (~2.7 MB) |
+| Download, `a*`/`b*` voices | ~334 MB | ~408 MB (325 MB model, 75 MB for 28 voices) |
+
+The two repos share `vocab_index.json`, `g2p_vocab.json`, `us_gold.json`, `us_silver.json` and the G2P bundles byte for byte, so token ids agree. The FluidInference repo has no `dict_de.json`; a listed file a repo lacks is skipped.
+
+A graph without a `speed` input renders at speed 1: `synthesize(speed:)` logs that the requested speed was ignored, and the seams are trimmed for speed 1. At speed 1, `kokoro_21_15s` speaks about 19 tokens per second with little lead-in, so a 200-token sentence takes about 10.2 s of its 15.3 s trusted window.
+
+A pass costs about the same whatever the text's length, since the decoder renders the whole window. Warm `synthesize` times measured on one Apple Silicon Mac with `.cpuAndNeuralEngine`:
+
+| Text | `kokoro_5s` | `kokoro_21_15s` |
+|---|---|---|
+| "Yes." (7 tokens) | 380 ms, 1 chunk | 1 200 ms, 1 chunk |
+| 60 tokens | 770 ms, 2 chunks | 1 210 ms, 1 chunk |
+| 200 tokens | 1 570 ms, 4 chunks | 1 240 ms, 1 chunk |
+
+The larger graph is faster for long sentences and slower for short replies. Loading with `offlineMode: true` takes about 0.6 s for either bundle; parsing a voice file with rows takes about 70 ms, so 28 voices add about 2 s.
+
+`voiceFilter` takes shell patterns on voice ids (`a*`, `bf_emma`) and limits both which `voices/<id>.json` files are downloaded and which are loaded from the cache. `nil`, the default, takes every voice.
 
 ## Phonemizer
 
@@ -151,6 +195,8 @@ Entries apply to the English path only: the `language` argument selects a dedica
 ## Voice Embeddings
 
 Each voice is a 256-dimensional Float32 vector stored in a per-voice JSON file. The embedding captures speaker identity and style characteristics. The first 128 dimensions are used by the decoder, the second 128 by the prosody model.
+
+Upstream Kokoro stores a voice as 510 such vectors, one per utterance length, and picks `pack[len(phonemes) - 1]`. A voice file's `embedding` key is the mean of those rows. Some voice files (the FluidInference repo's) also carry the rows under the keys `"1"` … `"510"`; for those, each chunk renders with the row for its own phoneme count `n`, BOS and EOS not counted: row `clamp(n - 1, 0, 509)`, key `"n"`. A voice file without rows, as in the aufklarer repos, uses `embedding` for every chunk.
 
 Naming convention: `[language][gender]_[name]`
 - `a` = American English, `b` = British English
@@ -249,8 +295,10 @@ python scripts/convert_kokoro_coreml.py --output /tmp/kokoro-coreml --quantize i
 ```
 Sources/KokoroTTS/
   Configuration.swift        Model config, voice/language selection
-  KokoroModel.swift          End-to-end CoreML model loading and inference
+  KokoroModel.swift          End-to-end CoreML model loading and inference; reads the graph's slots, window, speed input
   KokoroTTS.swift            High-level API (fromPretrained, synthesize, alignment)
+  KokoroChunkBudget.swift    Chunk budget and hard cap derived from the loaded graph
+  KokoroVoice.swift          Voice files: embedding, per-length rows, voice filter
   TextChunker.swift          Sentence/clause/word chunking of long text (based on speech-core, with documented divergences)
   ChunkSeams.swift           Silence trim at chunk seams inside a sentence
   Phonemizer.swift           English G2P + multilingual routing (en/zh/ja/hi/fr/es/pt/it/de)

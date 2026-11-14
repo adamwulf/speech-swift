@@ -37,7 +37,7 @@ final class E2EKokoroSeamTests: XCTestCase {
         ]
         let count: (String) -> Int = { m.phonemizer.tokenize($0, maxLength: .max, language: "en").count }
         for text in texts {
-            let plan = KokoroTTSModel.chunkPlan(text, countTokens: count)
+            let plan = KokoroTTSModel.chunkPlan(text, countTokens: count, budget: m.chunkBudget)
             XCTAssertGreaterThan(plan.count, 1, "The sentence must span several chunks")
             for speed: Float in [1.0, 1.2] {
                 var pieces: [[Float]] = []

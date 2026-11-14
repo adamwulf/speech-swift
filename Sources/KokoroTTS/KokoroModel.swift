@@ -4,33 +4,50 @@ import AudioCommon
 
 /// CoreML wrapper for Kokoro-82M end-to-end TTS inference.
 ///
-/// Loads a single pre-compiled `kokoro_5s.mlmodelc` that runs the full pipeline
-/// (BERT → duration → alignment → prosody → decoder) in one CoreML call.
+/// Loads one pre-compiled end-to-end bundle (`kokoro_5s.mlmodelc` by default)
+/// that runs the full pipeline (BERT → duration → alignment → prosody →
+/// decoder) in one CoreML call. The graph's fixed shapes are read from the
+/// loaded model, so bundles with a different input or output window load
+/// the same way.
 class KokoroNetwork {
 
     private let e2eModel: MLModel
+    /// Phoneme slots of the `input_ids` input (`[1, N]`): 128 for `kokoro_5s`.
+    let inputSlots: Int
+    /// Samples in the `audio` output window: 120 000 (5 s) for `kokoro_5s`.
+    let outputSamples: Int
+    /// Whether the graph takes a `speed` input. Graphs without one always
+    /// speak at speed 1.
+    let acceptsSpeed: Bool
 
-    /// Load E2E CoreML model from cache directory.
-    init(directory: URL, computeUnits: MLComputeUnits = .all) throws {
+    /// Load the end-to-end bundle `<modelFile>.mlmodelc` from `directory`.
+    init(directory: URL, modelFile: String, computeUnits: MLComputeUnits = .all) throws {
         let config = MLModelConfiguration()
         config.computeUnits = CoreMLComputeUnitsResolver.resolved(default: computeUnits)
 
-        let e2eNames = ["kokoro_5s", "kokoro_10s", "kokoro_15s", "kokoro"]
-        var loaded: MLModel?
-        for name in e2eNames {
-            let url = directory.appendingPathComponent("\(name).mlmodelc", isDirectory: true)
-            if FileManager.default.fileExists(atPath: url.path) {
-                loaded = try MLModel(contentsOf: url, configuration: config)
-                break
-            }
-        }
-
-        guard let model = loaded else {
+        let url = directory.appendingPathComponent("\(modelFile).mlmodelc", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: url.path) else {
             throw AudioModelError.modelLoadFailed(
                 modelId: "kokoro",
-                reason: "No Kokoro E2E model found in \(directory.path)")
+                reason: "No Kokoro E2E model \(modelFile).mlmodelc in \(directory.path)")
+        }
+        let model = try MLModel(contentsOf: url, configuration: config)
+
+        let description = model.modelDescription
+        guard let slots = description.inputDescriptionsByName["input_ids"]?
+                  .multiArrayConstraint?.shape.last?.intValue, slots > 2 else {
+            throw AudioModelError.modelLoadFailed(
+                modelId: "kokoro", reason: "\(modelFile) has no fixed-size input_ids input")
+        }
+        guard let audioShape = description.outputDescriptionsByName["audio"]?
+                  .multiArrayConstraint?.shape, !audioShape.isEmpty else {
+            throw AudioModelError.modelLoadFailed(
+                modelId: "kokoro", reason: "\(modelFile) has no fixed-size audio output")
         }
         e2eModel = model
+        inputSlots = slots
+        outputSamples = audioShape.reduce(1) { $0 * $1.intValue }
+        acceptsSpeed = description.inputDescriptionsByName["speed"] != nil
     }
 
     // MARK: - E2E Inference
@@ -41,6 +58,8 @@ class KokoroNetwork {
         let predDur: MLMultiArray
     }
 
+    /// One pass of the graph. `speed` is passed only to a graph that takes
+    /// it; nil there means speed 1.
     func predictE2E(
         inputIds: MLMultiArray,
         attentionMask: MLMultiArray,
@@ -50,19 +69,20 @@ class KokoroNetwork {
         let randomPhases = try MLMultiArray(shape: [1, 9], dataType: .float32)
         for i in 0..<9 { randomPhases[i] = NSNumber(value: Float.random(in: 0..<1)) }
 
-        let speedInput = speed ?? {
-            let s = try! MLMultiArray(shape: [1], dataType: .float32)
-            s[0] = NSNumber(value: Float(1.0))
-            return s
-        }()
-
-        let dict: [String: MLFeatureValue] = [
+        var dict: [String: MLFeatureValue] = [
             "input_ids": MLFeatureValue(multiArray: inputIds),
             "attention_mask": MLFeatureValue(multiArray: attentionMask),
             "ref_s": MLFeatureValue(multiArray: refS),
             "random_phases": MLFeatureValue(multiArray: randomPhases),
-            "speed": MLFeatureValue(multiArray: speedInput),
         ]
+        if acceptsSpeed {
+            let speedInput = try speed ?? {
+                let s = try MLMultiArray(shape: [1], dataType: .float32)
+                s[0] = NSNumber(value: Float(1.0))
+                return s
+            }()
+            dict["speed"] = MLFeatureValue(multiArray: speedInput)
+        }
 
         let input = try MLDictionaryFeatureProvider(dictionary: dict)
         let output = try e2eModel.prediction(from: input)
