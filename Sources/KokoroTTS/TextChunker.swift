@@ -2,18 +2,28 @@ import Foundation
 
 /// Splits text into pieces the fixed-capacity Kokoro graph can render.
 ///
-/// Mirrors speech-core's `chunk_text_for_synthesis` and
-/// `split_text_for_synthesis_retry`, so Apple and Android cut the same text
-/// in the same places. Pieces are packed greedily up to a token budget,
-/// preferring sentence boundaries, then clause boundaries (`,` `;` `:`), then
-/// words, then characters for a single oversized word. Punctuation is a
-/// boundary only when whitespace or the end of the text follows it, so
-/// "3.5", "1.000", "z.B." or "18:30" reach the phonemizer intact.
+/// Sentences and clauses are cut as speech-core's `chunk_text_for_synthesis`
+/// and `split_text_for_synthesis_retry` cut them: sentences are packed
+/// greedily up to a token budget, a sentence too long for one piece splits
+/// at clause boundaries (`,` `;` `:`), and a single word too long for one
+/// piece splits between characters. Punctuation is a boundary only when
+/// whitespace or the end of the text follows it, so "3.5", "1.000", "z.B."
+/// or "18:30" reach the phonemizer intact.
+///
+/// Cuts between words intentionally diverge from speech-core, which fills
+/// each piece to the budget and so cuts wherever the budget runs out, often
+/// leaving a stub of a word or two. Here a sentence or clause that has to be
+/// cut between words is split into the fewest pieces the budget allows, of
+/// about even length; among nearly balanced cuts, one just before a word
+/// that starts a phrase ("and", "because", "where", "to", "with", ...) wins.
+/// Sentence and clause boundaries still outrank any word cut. A piece below
+/// the minimum size joins a neighbour when the budget allows it.
 enum KokoroTextChunker {
 
-    /// Packs `text` into chunks of at most `maxTokens`. A last chunk below
-    /// `minTailTokens` merges into its predecessor when the result stays
-    /// within `hardCapTokens`, the model's absolute input capacity.
+    /// Packs `text` into chunks of at most `maxTokens`. A chunk below
+    /// `minTailTokens` joins its predecessor, or else its successor, when the
+    /// result stays within `maxTokens`; the last chunk may join its
+    /// predecessor up to `hardCapTokens`, the model's absolute input capacity.
     /// Whitespace-only text yields no chunks.
     static func chunk(
         _ text: String,
@@ -24,16 +34,49 @@ enum KokoroTextChunker {
     ) -> [String] {
         guard maxTokens > 0 else { return [] }
         var chunks: [String] = []
-        pack(splitUnits(text, isEnd: isSentenceEnd), countTokens: countTokens,
-             maxTokens: maxTokens, level: 0, into: &chunks)
-        if chunks.count >= 2, countTokens(chunks[chunks.count - 1]) < minTailTokens {
-            let merged = chunks[chunks.count - 2] + " " + chunks[chunks.count - 1]
-            if countTokens(merged) <= hardCapTokens {
-                chunks.removeLast()
-                chunks[chunks.count - 1] = merged
-            }
-        }
+        pack(splitUnits(text, isEnd: isSentenceEnd), level: .sentences, countTokens: countTokens,
+             maxTokens: maxTokens, minTokens: minTailTokens, into: &chunks)
+        mergeShortChunks(&chunks, countTokens: countTokens, maxTokens: maxTokens,
+                         hardCapTokens: hardCapTokens, minTokens: minTailTokens)
         return chunks
+    }
+
+    /// Joins each chunk below `minTokens` to a neighbour, the previous one
+    /// first, while the joined chunk stays within `maxTokens` (`hardCapTokens`
+    /// when the short chunk is the last one and joins its predecessor).
+    private static func mergeShortChunks(
+        _ chunks: inout [String],
+        countTokens: (String) -> Int,
+        maxTokens: Int,
+        hardCapTokens: Int,
+        minTokens: Int
+    ) {
+        var i = 0
+        while chunks.count >= 2, i < chunks.count {
+            guard countTokens(chunks[i]) < minTokens else {
+                i += 1
+                continue
+            }
+            let isLast = i == chunks.count - 1
+            if i > 0 {
+                let merged = chunks[i - 1] + " " + chunks[i]
+                if countTokens(merged) <= (isLast ? hardCapTokens : maxTokens) {
+                    chunks[i - 1] = merged
+                    chunks.remove(at: i)
+                    continue
+                }
+            }
+            if !isLast {
+                let merged = chunks[i] + " " + chunks[i + 1]
+                if countTokens(merged) <= maxTokens {
+                    chunks[i] = merged
+                    chunks.remove(at: i + 1)
+                    // Still short? Check the joined chunk again.
+                    continue
+                }
+            }
+            i += 1
+        }
     }
 
     /// Two strictly smaller pieces of a chunk the model could not render
@@ -127,14 +170,18 @@ enum KokoroTextChunker {
         return parts
     }
 
+    private enum Level { case sentences, clauses, words }
+
     /// Greedily packs `units` into chunks of at most `maxTokens`; a unit too
-    /// large on its own is refined at the next level (clauses, then words,
-    /// then characters).
+    /// large on its own is refined: a sentence into clauses, a clause (or a
+    /// sentence without clause punctuation) into balanced runs of words, a
+    /// word into characters.
     private static func pack(
         _ units: [String],
+        level: Level,
         countTokens: (String) -> Int,
         maxTokens: Int,
-        level: Int,
+        minTokens: Int,
         into out: inout [String]
     ) {
         var acc = ""
@@ -152,22 +199,163 @@ enum KokoroTextChunker {
                 acc = unit
                 continue
             }
-            var finer: [String] = []
-            if level == 0 {
-                finer = splitUnits(unit, isEnd: isClauseEnd)
-                // A long sentence without clause punctuation still falls back
-                // to whole words before any character cut.
-                if finer.count <= 1 { finer = splitWords(unit) }
-            } else if level == 1 {
-                finer = splitWords(unit)
-            }
-            if level >= 2 || finer.count <= 1 {
+            switch level {
+            case .sentences:
+                let clauses = splitUnits(unit, isEnd: isClauseEnd)
+                if clauses.count > 1 {
+                    pack(clauses, level: .clauses, countTokens: countTokens,
+                         maxTokens: maxTokens, minTokens: minTokens, into: &out)
+                } else {
+                    splitBetweenWords(unit, countTokens: countTokens, maxTokens: maxTokens,
+                                      minTokens: minTokens, into: &out)
+                }
+            case .clauses:
+                splitBetweenWords(unit, countTokens: countTokens, maxTokens: maxTokens,
+                                  minTokens: minTokens, into: &out)
+            case .words:
                 out.append(contentsOf: splitCharacters(unit, countTokens: countTokens, maxTokens: maxTokens))
-            } else {
-                pack(finer, countTokens: countTokens, maxTokens: maxTokens, level: level + 1, into: &out)
             }
         }
         if !acc.isEmpty { out.append(acc) }
+    }
+
+    /// Cuts a unit too long for one chunk between words, as evenly as the
+    /// words allow; a word too long for any chunk falls back to greedy word
+    /// packing with that word cut between characters.
+    private static func splitBetweenWords(
+        _ unit: String,
+        countTokens: (String) -> Int,
+        maxTokens: Int,
+        minTokens: Int,
+        into out: inout [String]
+    ) {
+        let words = splitWords(unit)
+        if let pieces = balancedWordSplit(words, countTokens: countTokens,
+                                          maxTokens: maxTokens, minTokens: minTokens) {
+            out.append(contentsOf: pieces)
+        } else {
+            pack(words, level: .words, countTokens: countTokens,
+                 maxTokens: maxTokens, minTokens: minTokens, into: &out)
+        }
+    }
+
+    // MARK: - Balanced word cuts
+
+    /// Words that start a phrase, so a cut just before one falls where a
+    /// speaker could pause: conjunctions, relative words and common
+    /// prepositions. English only; other languages cut for balance alone.
+    static let phraseStarters: Set<String> = [
+        "and", "or", "but", "so", "because", "although", "though", "while",
+        "unless", "until", "since", "if", "whether",
+        "where", "when", "which", "that", "who", "whom", "whose", "what", "why", "how",
+        "to", "for", "with", "about", "from", "into", "in", "on", "at", "by",
+        "through", "after", "before", "without", "during",
+    ]
+
+    /// Cost of a cut that is not just before a phrase starter, in the units
+    /// of the balance cost (squared tokens per piece). Moving one cut `d`
+    /// tokens off the most even position costs about `2 d^2`, so a phrase
+    /// cut wins while it sits within about 9 tokens, one or two words, of
+    /// the most even cut.
+    static let nonPhraseCutCost = 160
+
+    /// How often the search may re-run after an exact count shows that an
+    /// estimated piece breaks a size limit.
+    private static let maxRecounts = 8
+
+    static func startsPhrase(_ word: String) -> Bool {
+        let bare = word.drop(while: { !$0.isLetter }).lowercased()
+        return phraseStarters.contains(bare)
+    }
+
+    /// Cuts `words` into the fewest pieces of at most `maxTokens` and, where
+    /// the words allow it, at least `minTokens`. Among those, the pieces are
+    /// as even as possible, with a cut just before a phrase starter
+    /// preferred over a slightly more even one. Returns nil for fewer than
+    /// two words or a single word over `maxTokens`.
+    static func balancedWordSplit(
+        _ words: [String],
+        countTokens: (String) -> Int,
+        maxTokens: Int,
+        minTokens: Int
+    ) -> [String]? {
+        let n = words.count
+        guard n >= 2 else { return nil }
+        // A run of words costs about the sum of its words plus a separator
+        // token per space, so the search estimates runs from per-word counts
+        // instead of phonemizing every candidate, then counts the pieces it
+        // picks exactly. A piece the exact count rejects is remembered and
+        // the search runs again.
+        let overhead = countTokens("")
+        let wordCounts = words.map(countTokens)
+        guard wordCounts.allSatisfy({ $0 <= maxTokens }) else { return nil }
+        let separator = max(0, countTokens(words[0] + " " + words[1]) - wordCounts[0] - wordCounts[1] + overhead)
+        var prefix = [0]
+        for count in wordCounts { prefix.append(prefix[prefix.count - 1] + count - overhead) }
+        var exact: [Int: Int] = [:]
+        let tokens: (Int, Int) -> Int = { i, j in
+            exact[i * (n + 1) + j] ?? overhead + prefix[j] - prefix[i] + separator * (j - i - 1)
+        }
+        let cutCost: (Int) -> Int = { startsPhrase(words[$0]) ? 0 : nonPhraseCutCost }
+
+        for floor in [minTokens, 0] {
+            for _ in 0..<maxRecounts {
+                guard let starts = cheapestSplit(
+                    count: n, tokens: tokens, cutCost: cutCost,
+                    maxTokens: maxTokens, minTokens: floor) else { break }
+                var pieces: [String] = []
+                var fits = true
+                for (start, end) in zip(starts, starts.dropFirst() + [n]) {
+                    let piece = words[start..<end].joined(separator: " ")
+                    let count = countTokens(piece)
+                    exact[start * (n + 1) + end] = count
+                    if count > maxTokens || count < floor { fits = false }
+                    pieces.append(piece)
+                }
+                if fits { return pieces }
+            }
+        }
+        return nil
+    }
+
+    /// The start index of each piece in the cheapest cut of `count` words:
+    /// fewest pieces first, then the lowest sum of squared piece sizes plus
+    /// `cutCost` for each cut. Nil when no cut keeps every piece within
+    /// `minTokens...maxTokens`.
+    private static func cheapestSplit(
+        count n: Int,
+        tokens: (Int, Int) -> Int,
+        cutCost: (Int) -> Int,
+        maxTokens: Int,
+        minTokens: Int
+    ) -> [Int]? {
+        // best[j]: (pieces, cost) of the cheapest cut of words[0..<j].
+        var pieces = [Int](repeating: .max, count: n + 1)
+        var cost = [Int](repeating: .max, count: n + 1)
+        var from = [Int](repeating: -1, count: n + 1)
+        pieces[0] = 0
+        cost[0] = 0
+        for j in 1...n {
+            for i in 0..<j where pieces[i] != .max {
+                let size = tokens(i, j)
+                guard size <= maxTokens, size >= minTokens else { continue }
+                let p = pieces[i] + 1
+                let c = cost[i] + size * size + (i > 0 ? cutCost(i) : 0)
+                if p < pieces[j] || (p == pieces[j] && c < cost[j]) {
+                    pieces[j] = p
+                    cost[j] = c
+                    from[j] = i
+                }
+            }
+        }
+        guard pieces[n] != .max else { return nil }
+        var starts: [Int] = []
+        var j = n
+        while j > 0 {
+            starts.append(from[j])
+            j = from[j]
+        }
+        return starts.reversed()
     }
 
     // MARK: - Retry split
