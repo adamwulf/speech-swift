@@ -2,13 +2,15 @@
 
 Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSModel` loads through `fromPretrained(modelFile:)`. Its bidirectional LSTMs hold their state on padded steps, so predicted durations match upstream Kokoro. The step-by-step plan is [docs/plans/kokoro-e2e-5s-export-ab.md](../../docs/plans/kokoro-e2e-5s-export-ab.md), and the findings are in [docs/research/2026-11-13-kokoro-long-window-and-exporters.md](../../docs/research/2026-11-13-kokoro-long-window-and-exporters.md).
 
-The exporter itself is not vendored here. It is elizaOS/eliza's `packages/training/scripts/kokoro/coreml/export_e2e_coreml.py` (MIT, Copyright (c) 2026 Shaw Walters and elizaOS Contributors) at commit `b2e30700d0b9a63e5e478505b6ddd28cd4fa8bc3`, run against mattmireles/kokoro-coreml (Apache-2.0) at `2a75c780664b2ea0430eef6829c04f4704555623`.
+`export_e2e_coreml.py` is elizaOS/eliza's `packages/training/scripts/kokoro/coreml/export_e2e_coreml.py` (MIT, Copyright (c) 2026 Shaw Walters and elizaOS Contributors; see `LICENSE-elizaOS-eliza`) at commit `b2e30700d0b9a63e5e478505b6ddd28cd4fa8bc3`, with our changes applied. It runs against mattmireles/kokoro-coreml (Apache-2.0) at `2a75c780664b2ea0430eef6829c04f4704555623`.
 
 ## Files
 
 | File | |
 |---|---|
-| `export_e2e_coreml.local.patch` | Our changes to eliza's exporter; apply with `patch -p1` in the folder that holds the exporter |
+| `export_e2e_coreml.py` | The exporter as run: eliza's, with the changes below |
+| `LICENSE-elizaOS-eliza` | eliza's MIT license, which covers `export_e2e_coreml.py` |
+| `export_e2e_coreml.local.patch` | The same changes as a diff against eliza's file (`patch -p1`) |
 | `custom_stft.coreml.patch` | eliza's patch to mattmireles' `kokoro/custom_stft.py` |
 | `parity_coreml.py` | CoreML vs torch: durations, waveform and spectral parity, on `CPU_ONLY` and `CPU_AND_NE` |
 | `diag_coreml.py` | Where CoreML diverges: F0, harmonic source, audio |
