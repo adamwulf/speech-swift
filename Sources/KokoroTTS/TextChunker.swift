@@ -20,7 +20,8 @@ import Foundation
 ///   ("and", "because", "where", "to", "with", ...) or just after clause or
 ///   sentence punctuation wins. A sentence or clause below the minimum size
 ///   is cut together with the next unit when it can neither share a piece
-///   with it nor join the piece before it, rather than left on its own.
+///   with it nor join the piece before it, or when the next unit is too long
+///   for a piece on its own, rather than left on its own.
 ///   When the token estimate behind this search cannot settle on pieces
 ///   that fit, the words are packed greedily as speech-core packs them.
 /// - Short pieces. speech-core only merges a short last piece into the one
@@ -233,14 +234,16 @@ enum KokoroTextChunker {
             var unit = unit
             if !acc.isEmpty {
                 // Short text packed so far would become a chunk of its own.
-                // When the chunk before it can take it in and the next unit
-                // fits alone, it is flushed and joins that chunk later
-                // (`mergeShortChunks`). Otherwise it is refined together with
-                // the next unit (at clauses, then words), since the two are
-                // over budget together.
-                let previousTakesIt = out.last.map { countTokens($0 + " " + acc) <= maxTokens } ?? false
+                // When the next unit fits alone and the chunk before can
+                // still take the short text in (after `mergeShortChunks`
+                // joins that chunk to its own predecessor, if it is short
+                // too), the short text is flushed and joins it there.
+                // Otherwise it is refined together with the next unit (at
+                // clauses, then words), since the two are over budget together.
                 if level != .words, countTokens(acc) < minTokens,
-                   countTokens(unit) > maxTokens || !previousTakesIt {
+                   countTokens(unit) > maxTokens
+                    || !chunkBefore(out, takes: acc, countTokens: countTokens,
+                                    maxTokens: maxTokens, minTokens: minTokens) {
                     unit = candidate
                 } else {
                     out.append(acc)
@@ -269,6 +272,25 @@ enum KokoroTextChunker {
             }
         }
         if !acc.isEmpty { out.append(acc) }
+    }
+
+    /// Whether the last chunk in `out` can take `text` in once
+    /// `mergeShortChunks` has run: a last chunk below `minTokens` is taken
+    /// as joined to its predecessor when that join fits, since the merge
+    /// does that first.
+    private static func chunkBefore(
+        _ out: [String],
+        takes text: String,
+        countTokens: (String) -> Int,
+        maxTokens: Int,
+        minTokens: Int
+    ) -> Bool {
+        guard var previous = out.last else { return false }
+        if out.count >= 2, countTokens(previous) < minTokens {
+            let joined = out[out.count - 2] + " " + previous
+            if countTokens(joined) <= maxTokens { previous = joined }
+        }
+        return countTokens(previous + " " + text) <= maxTokens
     }
 
     /// Cuts a unit too long for one chunk between words, as evenly as the

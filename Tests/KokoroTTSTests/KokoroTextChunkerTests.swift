@@ -216,6 +216,29 @@ final class KokoroTextChunkerTests: XCTestCase {
         ])
     }
 
+    func testShortSentenceAfterAShortChunkIsNotLeftAlone() {
+        // "ok." (5 tokens) ends the first sentence and will join the piece
+        // before it, which leaves no room for "Thanks." (9); judged against
+        // "ok." alone, "Thanks." was flushed and rendered on its own.
+        let text = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iii, ok. Thanks. kkkk llll mmmm nnnn oooo pp."
+        XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
+            "aaaa bbbb cccc dddd",
+            "eeee ffff gggg hhhh iii, ok.",
+            "Thanks. kkkk llll",
+            "mmmm nnnn oooo pp.",
+        ])
+    }
+
+    func testShortOpenerBeforeATooLongClauseIsCutWithItEvenWhenThePreviousChunkHasRoom() {
+        // The chunk before could take "Okay," in, but the clause after it is
+        // too long for a chunk anyway, so "Okay," is cut with that clause.
+        XCTAssertEqual(chunk("aaaa bbbb cccc. Okay, dddd eeee ffff gggg hhhh iiii jjjj kkkk", budget: 30, hardCap: 30), [
+            "aaaa bbbb cccc.",
+            "Okay, dddd eeee ffff",
+            "gggg hhhh iiii jjjj kkkk",
+        ])
+    }
+
     func testShortSentenceIsCutWithTheLongSentenceAfterIt() {
         let text = "Okay. aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmm"
         XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
