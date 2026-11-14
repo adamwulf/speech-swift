@@ -1,0 +1,108 @@
+--- a/export_e2e_coreml.py
++++ b/export_e2e_coreml.py
+@@ -78,9 +78,29 @@
+     return x0 * (1.0 - w1_t) + x1 * w1_t
+ 
+ 
++def _nearest_resample(x: torch.Tensor, out_len: int) -> torch.Tensor:
++    """`F.interpolate(x, size=out_len, mode="nearest")` on the last dim, as a
++    static gather. coremltools 8.3 lowers the interpolate to an integer-scale
++    upsample, so a 200-frame mask stretched to 24,001 samples comes out
++    24,000 long. Indices match PyTorch's float32 `floor(dst * in/out)`
++    (checked for 200/400/600-frame masks at every decoder length).
++    [local change, not in eliza]"""
++    in_len = int(x.shape[-1])
++    if in_len == out_len:
++        return x
++    scale = np.float32(in_len) / np.float32(out_len)
++    idx = np.floor(np.arange(out_len, dtype=np.float32) * scale).astype(np.int64)
++    idx = np.minimum(idx, in_len - 1)
++    return torch.index_select(x, -1, torch.tensor(idx, dtype=torch.long))
++
++
+ # ---- deterministic hn-NSF: injected phase + zero excitation noise ----
+ def _f02sine_injected(self, f0_values):
+-    rad_values = (f0_values / self.sampling_rate) % 1
++    # [local change, not in eliza] `x % 1` converts wrongly in coremltools 8.3
++    # (the sine source came out all zero); x - floor(x) is the same value,
++    # Python modulo semantics included (negative x wraps to 1 + x).
++    x = f0_values / self.sampling_rate
++    rad_values = x - torch.floor(x)
+     # injected phase [1,9]; fundamental (col 0) carries no phase noise
+     phase = getattr(self, "_inj_phase")
+     mask = torch.ones(1, phase.shape[1], dtype=phase.dtype, device=phase.device)
+@@ -130,7 +150,7 @@
+         mean = x.mean(dim=2, keepdim=True)
+         var = x.var(dim=2, unbiased=False, keepdim=True)
+     else:
+-        m = F.interpolate(fm, size=T, mode="nearest")  # [1,1,T] valid/pad split
++        m = _nearest_resample(fm, T)  # [1,1,T] valid/pad split
+         denom = m.sum(dim=2, keepdim=True).clamp(min=1.0)
+         mean = (x * m).sum(dim=2, keepdim=True) / denom
+         var = (((x - mean) ** 2) * m).sum(dim=2, keepdim=True) / denom
+@@ -375,15 +395,42 @@
+     phases = torch.rand(1, 9, generator=g, dtype=torch.float32)
+     speed = torch.tensor([1.0], dtype=torch.float32)
+     return ids, mask, ref_s, phases, speed
++
++
++NUM_HARMONICS = 9  # SineGen harmonic_num + 1: the phase path's distinctive axis
++FP32_KEPT = []
++
++
++def _keep_fp16(op) -> bool:
++    """fp16mix op selector [local change, not in eliza]: an op stays fp32
++    when any output is a rank-3 tensor with the 9-harmonic axis, which is the
++    whole sine-source phase path (f0 x harmonics, rad, resampled and
++    cumulative phase, sin, sine waves)."""
++    for out in op.outputs:
++        shape = getattr(out, "shape", None)
++        if shape is not None and len(shape) == 3 and NUM_HARMONICS in [d for d in shape if isinstance(d, int)]:
++            FP32_KEPT.append(op.op_type)
++            return False
++    return True
+ 
+ 
++def _compute_precision(ct, precision):
++    if precision == "fp32":
++        return ct.precision.FLOAT32
++    if precision == "fp16mix":
++        return ct.transform.FP16ComputePrecision(op_selector=_keep_fp16)
++    return ct.precision.FLOAT16
++
++
+ def main():
+     ap = argparse.ArgumentParser()
+     ap.add_argument("--stage", choices=["torch", "full"], default="torch")
+     ap.add_argument("--seconds", type=int, default=5)
+     ap.add_argument("--frames", type=int, default=0, help="override bucket frames (else seconds*40)")
+     ap.add_argument("--tokens", type=int, default=128)
+-    ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp32")
++    # fp16mix [local change, not in eliza]: fp16 everywhere except the sine
++    # source's phase path, which needs more than fp16's 11 bits.
++    ap.add_argument("--precision", choices=["fp16", "fp32", "fp16mix"], default="fp32")
+     ap.add_argument("--out", default=os.environ.get("KOKORO_COREML_OUT", "/tmp/kokoro-coreml-work/out"))
+     args = ap.parse_args()
+     bucket_frames = args.frames if args.frames > 0 else args.seconds * SR // SAMPLES_PER_FRAME
+@@ -477,14 +524,19 @@
+         ],
+         convert_to="mlprogram",
+         minimum_deployment_target=ct.target.iOS18,
+-        compute_precision=(ct.precision.FLOAT32 if args.precision == "fp32" else ct.precision.FLOAT16),
+-        compute_units=ct.ComputeUnit.ALL,
++        compute_precision=_compute_precision(ct, args.precision),
++        # [local change, not in eliza] ALL makes coremltools load the model for
++        # the GPU, which aborts in MPSGraph on macOS 27. Load-time only.
++        compute_units=ct.ComputeUnit.CPU_AND_NE,
+     )
+     out = Path(args.out)
+     out.mkdir(parents=True, exist_ok=True)
+     pkg = out / f"kokoro_{args.seconds}s.mlpackage"
+     mlmodel.save(str(pkg))
+     print(f"[saved] {pkg}")
++    if args.precision == "fp16mix":
++        from collections import Counter
++        print(f"[fp16mix] ops kept fp32: {len(FP32_KEPT)} {dict(Counter(FP32_KEPT))}")
+ 
+     print("[parity] coreml vs torch...")
+     pred = mlmodel.predict({
