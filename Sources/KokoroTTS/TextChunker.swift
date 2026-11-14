@@ -10,20 +10,30 @@ import Foundation
 /// whitespace or the end of the text follows it, so "3.5", "1.000", "z.B."
 /// or "18:30" reach the phonemizer intact.
 ///
-/// Cuts between words intentionally diverge from speech-core, which fills
-/// each piece to the budget and so cuts wherever the budget runs out, often
-/// leaving a stub of a word or two. Here a sentence or clause that has to be
-/// cut between words is split into the fewest pieces the budget allows, of
-/// about even length; among nearly balanced cuts, one just before a word
-/// that starts a phrase ("and", "because", "where", "to", "with", ...) wins.
-/// Sentence and clause boundaries still outrank any word cut. A piece below
-/// the minimum size joins a neighbour when the budget allows it.
+/// Two rules intentionally diverge from speech-core:
+///
+/// - Cuts between words. speech-core fills each piece to the budget and so
+///   cuts wherever the budget runs out, often leaving a stub of a word or
+///   two. Here a sentence or clause that has to be cut between words is
+///   split into the fewest pieces the budget allows, of about even length;
+///   among nearly balanced cuts, one just before a word that starts a phrase
+///   ("and", "because", "where", "to", "with", ...) or just after clause or
+///   sentence punctuation wins. A sentence or clause below the minimum size
+///   that comes right before one too long for a piece is cut together with
+///   it rather than left on its own. When the token estimate behind this
+///   search cannot settle on pieces that fit, the words are packed greedily
+///   as speech-core packs them.
+/// - Short pieces. speech-core only merges a short last piece into the one
+///   before it. Here any piece below the minimum size joins a neighbour
+///   within the budget, one in the same sentence first.
+///
+/// Sentence and clause boundaries still outrank any word cut.
 enum KokoroTextChunker {
 
     /// Packs `text` into chunks of at most `maxTokens`. A chunk below
-    /// `minTailTokens` joins its predecessor, or else its successor, when the
-    /// result stays within `maxTokens`; the last chunk may join its
-    /// predecessor up to `hardCapTokens`, the model's absolute input capacity.
+    /// `minTailTokens` joins a neighbour when the result stays within
+    /// `maxTokens`; the last chunk may join its predecessor up to
+    /// `hardCapTokens`, the model's absolute input capacity.
     /// Whitespace-only text yields no chunks.
     static func chunk(
         _ text: String,
@@ -36,21 +46,23 @@ enum KokoroTextChunker {
         var chunks: [String] = []
         pack(splitUnits(text, isEnd: isSentenceEnd), level: .sentences, countTokens: countTokens,
              maxTokens: maxTokens, minTokens: minTailTokens, into: &chunks)
-        mergeShortChunks(&chunks, countTokens: countTokens, maxTokens: maxTokens,
-                         hardCapTokens: hardCapTokens, minTokens: minTailTokens)
-        return chunks
+        return mergeShortChunks(chunks, countTokens: countTokens, maxTokens: maxTokens,
+                                hardCapTokens: hardCapTokens, minTokens: minTailTokens)
     }
 
-    /// Joins each chunk below `minTokens` to a neighbour, the previous one
-    /// first, while the joined chunk stays within `maxTokens` (`hardCapTokens`
-    /// when the short chunk is the last one and joins its predecessor).
-    private static func mergeShortChunks(
-        _ chunks: inout [String],
+    /// Joins each chunk below `minTokens` to a neighbour while the joined
+    /// chunk stays within `maxTokens` (`hardCapTokens` when the short chunk
+    /// is the last one and joins its predecessor). A neighbour in the same
+    /// sentence comes first, the previous one before the next; a join across
+    /// a sentence end, where a seam pauses naturally, is the last resort.
+    static func mergeShortChunks(
+        _ chunks: [String],
         countTokens: (String) -> Int,
         maxTokens: Int,
         hardCapTokens: Int,
         minTokens: Int
-    ) {
+    ) -> [String] {
+        var chunks = chunks
         var i = 0
         while chunks.count >= 2, i < chunks.count {
             guard countTokens(chunks[i]) < minTokens else {
@@ -58,25 +70,45 @@ enum KokoroTextChunker {
                 continue
             }
             let isLast = i == chunks.count - 1
-            if i > 0 {
-                let merged = chunks[i - 1] + " " + chunks[i]
-                if countTokens(merged) <= (isLast ? hardCapTokens : maxTokens) {
-                    chunks[i - 1] = merged
-                    chunks.remove(at: i)
-                    continue
+            let hasPrevious = i > 0
+            let previousInSentence = hasPrevious && !endsSentence(chunks[i - 1])
+            let nextInSentence = !isLast && !endsSentence(chunks[i])
+            // true joins the previous chunk, false the next one.
+            var order: [Bool] = []
+            if previousInSentence { order.append(true) }
+            if nextInSentence { order.append(false) }
+            if hasPrevious && !previousInSentence { order.append(true) }
+            if !isLast && !nextInSentence { order.append(false) }
+
+            var joined = false
+            for joinPrevious in order {
+                if joinPrevious {
+                    let merged = chunks[i - 1] + " " + chunks[i]
+                    if countTokens(merged) <= (isLast ? hardCapTokens : maxTokens) {
+                        chunks[i - 1] = merged
+                        chunks.remove(at: i)
+                        // Check the joined chunk again.
+                        i -= 1
+                        joined = true
+                        break
+                    }
+                } else {
+                    let merged = chunks[i] + " " + chunks[i + 1]
+                    if countTokens(merged) <= maxTokens {
+                        chunks[i] = merged
+                        chunks.remove(at: i + 1)
+                        joined = true
+                        break
+                    }
                 }
             }
-            if !isLast {
-                let merged = chunks[i] + " " + chunks[i + 1]
-                if countTokens(merged) <= maxTokens {
-                    chunks[i] = merged
-                    chunks.remove(at: i + 1)
-                    // Still short? Check the joined chunk again.
-                    continue
-                }
-            }
-            i += 1
+            if !joined { i += 1 }
         }
+        return chunks
+    }
+
+    private static func endsSentence(_ text: String) -> Bool {
+        KokoroChunkSeams.kind(after: text) == .sentence
     }
 
     /// Two strictly smaller pieces of a chunk the model could not render
@@ -175,7 +207,9 @@ enum KokoroTextChunker {
     /// Greedily packs `units` into chunks of at most `maxTokens`; a unit too
     /// large on its own is refined: a sentence into clauses, a clause (or a
     /// sentence without clause punctuation) into balanced runs of words, a
-    /// word into characters.
+    /// word into characters. Sentences or clauses packed so far that stay
+    /// below `minTokens` are refined together with a too-large unit after
+    /// them instead of becoming a chunk of their own.
     private static func pack(
         _ units: [String],
         level: Level,
@@ -191,8 +225,13 @@ enum KokoroTextChunker {
                 acc = candidate
                 continue
             }
+            var unit = unit
             if !acc.isEmpty {
-                out.append(acc)
+                if level != .words, countTokens(acc) < minTokens, countTokens(unit) > maxTokens {
+                    unit = candidate
+                } else {
+                    out.append(acc)
+                }
                 acc = ""
             }
             if countTokens(unit) <= maxTokens {
@@ -220,8 +259,9 @@ enum KokoroTextChunker {
     }
 
     /// Cuts a unit too long for one chunk between words, as evenly as the
-    /// words allow; a word too long for any chunk falls back to greedy word
-    /// packing with that word cut between characters.
+    /// words allow. When `balancedWordSplit` finds no cut (a word too long
+    /// for any chunk, or recounts that never settle), the words are packed
+    /// greedily instead, a word too long for any chunk cut between characters.
     private static func splitBetweenWords(
         _ unit: String,
         countTokens: (String) -> Int,
@@ -252,11 +292,11 @@ enum KokoroTextChunker {
         "through", "after", "before", "without", "during",
     ]
 
-    /// Cost of a cut that is not just before a phrase starter, in the units
-    /// of the balance cost (squared tokens per piece). Moving one cut `d`
-    /// tokens off the most even position costs about `2 d^2`, so a phrase
-    /// cut wins while it sits within about 9 tokens, one or two words, of
-    /// the most even cut.
+    /// Cost of a cut that is neither just before a phrase starter nor just
+    /// after clause or sentence punctuation, in the units of the balance cost
+    /// (squared tokens per piece). Moving one cut `d` tokens off the most
+    /// even position costs about `2 d^2`, so a free cut wins while it sits
+    /// within about 9 tokens, one or two words, of the most even cut.
     static let nonPhraseCutCost = 160
 
     /// How often the search may re-run after an exact count shows that an
@@ -268,11 +308,19 @@ enum KokoroTextChunker {
         return phraseStarters.contains(bare)
     }
 
+    /// Whether `word` ends in clause or sentence punctuation, closing quotes
+    /// and brackets aside: a cut right after it keeps the text's own boundary.
+    static func endsWithPunctuation(_ word: String) -> Bool {
+        KokoroChunkSeams.kind(after: word) != .word
+    }
+
     /// Cuts `words` into the fewest pieces of at most `maxTokens` and, where
     /// the words allow it, at least `minTokens`. Among those, the pieces are
-    /// as even as possible, with a cut just before a phrase starter
-    /// preferred over a slightly more even one. Returns nil for fewer than
-    /// two words or a single word over `maxTokens`.
+    /// as even as possible, with a cut just before a phrase starter or just
+    /// after clause or sentence punctuation preferred over a slightly more
+    /// even one. Returns nil for fewer than two words, for a single word over
+    /// `maxTokens`, and when the recounts run out before the exact counts
+    /// confirm a cut; `splitBetweenWords` then packs the words greedily.
     static func balancedWordSplit(
         _ words: [String],
         countTokens: (String) -> Int,
@@ -289,14 +337,20 @@ enum KokoroTextChunker {
         let overhead = countTokens("")
         let wordCounts = words.map(countTokens)
         guard wordCounts.allSatisfy({ $0 <= maxTokens }) else { return nil }
-        let separator = max(0, countTokens(words[0] + " " + words[1]) - wordCounts[0] - wordCounts[1] + overhead)
         var prefix = [0]
         for count in wordCounts { prefix.append(prefix[prefix.count - 1] + count - overhead) }
+        // The separator is calibrated on the whole run, not on one pair: a
+        // word alone can phonemize differently than in context ("A" alone is
+        // two phonemes, one in "A few").
+        let whole = countTokens(words.joined(separator: " "))
+        let separator = max(0, Int((Double(whole - overhead - prefix[n]) / Double(n - 1)).rounded()))
         var exact: [Int: Int] = [:]
         let tokens: (Int, Int) -> Int = { i, j in
             exact[i * (n + 1) + j] ?? overhead + prefix[j] - prefix[i] + separator * (j - i - 1)
         }
-        let cutCost: (Int) -> Int = { startsPhrase(words[$0]) ? 0 : nonPhraseCutCost }
+        let cutCost: (Int) -> Int = {
+            startsPhrase(words[$0]) || endsWithPunctuation(words[$0 - 1]) ? 0 : nonPhraseCutCost
+        }
 
         for floor in [minTokens, 0] {
             for _ in 0..<maxRecounts {

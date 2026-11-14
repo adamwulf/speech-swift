@@ -124,18 +124,90 @@ final class KokoroTextChunkerTests: XCTestCase {
     }
 
     func testWordCutRecountsWhenEstimateIsLow() {
-        // A counter where joining words costs more than the parts suggest
-        // (one token per space, except between the first two words, which
-        // the estimate calibrates on). The estimate's 22 + 22 split counts
-        // 25 + 26 exactly, so the search must recount and use three pieces.
-        let spaced: (String) -> Int = { text in
-            2 + text.filter { $0 != " " }.count + max(0, text.filter { $0 == " " }.count - (text.hasPrefix("aaaa bbbb") ? 1 : 0))
+        // A counter where one word pair costs 3 extra tokens together, which
+        // neither per-word counts nor the whole-run average capture. The
+        // estimate's only two-piece cut (22 + 22) counts 25 + 22 exactly, so
+        // the search must recount and use three pieces.
+        let paired: (String) -> Int = { text in
+            2 + text.filter { $0 != " " }.count + (text.contains("dddd eeee") ? 3 : 0)
         }
         let words = KokoroTextChunker.splitWords("aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj")
-        let pieces = KokoroTextChunker.balancedWordSplit(words, countTokens: spaced, maxTokens: 24, minTokens: 12)
+        let pieces = KokoroTextChunker.balancedWordSplit(words, countTokens: paired, maxTokens: 24, minTokens: 12)
         XCTAssertEqual(pieces?.count, 3)
-        for piece in pieces ?? [] { XCTAssertLessThanOrEqual(spaced(piece), 24) }
+        for piece in pieces ?? [] { XCTAssertLessThanOrEqual(paired(piece), 24) }
         XCTAssertEqual(pieces?.joined(separator: " "), words.joined(separator: " "))
+    }
+
+    func testSeparatorIsCalibratedOnTheWholeRun() {
+        // A lone "a" costs two tokens but one in context, like Kokoro's "A"
+        // (eI alone, ɐ in "A few"), and every space costs one. Calibrating on
+        // the first pair alone read the space as free, so every run looked a
+        // token short per space and the search fell back to greedy filling.
+        let contextual: (String) -> Int = { text in
+            let words = text.split(separator: " ")
+            let letters = words.reduce(0) { sum, word in
+                sum + (word == "a" ? (words.count == 1 ? 2 : 1) : word.count)
+            }
+            return 2 + letters + max(0, words.count - 1)
+        }
+        // 23 words over a 30-token budget: 5 pieces at least.
+        let words = ["a"] + (0..<22).map { String(repeating: Character(UnicodeScalar(98 + $0 % 24)!), count: 4) }
+        let pieces = KokoroTextChunker.balancedWordSplit(words, countTokens: contextual, maxTokens: 30, minTokens: 12)
+        XCTAssertEqual(pieces?.count, 5)
+        for piece in pieces ?? [] {
+            XCTAssertLessThanOrEqual(contextual(piece), 30)
+            XCTAssertGreaterThanOrEqual(contextual(piece), 20)
+        }
+        XCTAssertEqual(pieces?.joined(separator: " "), words.joined(separator: " "))
+    }
+
+    func testCutAfterPunctuationIsFree() {
+        // As with a phrase starter, a cut right after the text's own clause
+        // or sentence punctuation (15 + 22 tokens) beats the most even cut
+        // (19 + 18).
+        for mark in [",", "."] {
+            let words = KokoroTextChunker.splitWords("aaaa bbbb cccc\(mark) dddd eeee ffff gggg hhhh")
+            XCTAssertEqual(
+                KokoroTextChunker.balancedWordSplit(words, countTokens: count, maxTokens: 30, minTokens: 12),
+                ["aaaa bbbb cccc\(mark)", "dddd eeee ffff gggg hhhh"])
+        }
+    }
+
+    func testShortOpeningClauseIsCutWithTheLongClause() {
+        // "Okay," is 7 tokens. The long clause alone splits 26 + 29, too full
+        // for "Okay," to join either piece, so it used to render on its own.
+        let text = "Okay, aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmm"
+        XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
+            "Okay, aaaa bbbb cccc",
+            "dddd eeee ffff gggg hhhh",
+            "iiii jjjj kkkk llll mmm",
+        ])
+    }
+
+    func testShortSentenceIsCutWithTheLongSentenceAfterIt() {
+        let text = "Okay. aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmm"
+        XCTAssertEqual(chunk(text, budget: 30, hardCap: 30), [
+            "Okay. aaaa bbbb cccc",
+            "dddd eeee ffff gggg hhhh",
+            "iiii jjjj kkkk llll mmm",
+        ])
+    }
+
+    func testShortChunkJoinsItsOwnSentenceFirst() {
+        let merge: ([String]) -> [String] = {
+            KokoroTextChunker.mergeShortChunks($0, countTokens: self.count, maxTokens: 30,
+                                               hardCapTokens: 30, minTokens: 12)
+        }
+        // Both joins fit; the one inside the sentence keeps the seam at the
+        // sentence end, where the pause belongs.
+        XCTAssertEqual(merge(["aaaa bbbb cccc overall.", "Still,", "the marketing team wants"]),
+                       ["aaaa bbbb cccc overall.", "Still, the marketing team wants"])
+        // Only the join across the sentence end fits.
+        XCTAssertEqual(merge(["aaaa bbbb overall.", "Still,", "the marketing team wants more"]),
+                       ["aaaa bbbb overall. Still,", "the marketing team wants more"])
+        // A short sentence end joins the start of its own sentence.
+        XCTAssertEqual(merge(["aaaa bbbb cccc", "dd.", "Next sentence here."]),
+                       ["aaaa bbbb cccc dd.", "Next sentence here."])
     }
 
     func testShortClauseJoinsTheNextChunk() {
