@@ -1,11 +1,13 @@
 """Copy A/B WAV pairs to shuffled names for blind listening.
 
-Usage: python make_blind_set.py <listen_dir> <blind_dir> <key_csv> [label:configA:configB ...]
+Usage: python make_blind_set.py <listen_dir> <blind_dir> <key_csv> [texts=a,b,...] [label:configA:configB ...]
 
 For each text and each pair, writes the two configurations' WAVs as
 <text>_<label>_1.wav / _2.wav in random order, and records which is which
 in key_csv (keep it closed while listening). Without pair arguments it
-pairs A with X1 (label ids12) and A0 with X2 (label ids00).
+pairs A with X1 (label ids12) and A0 with X2 (label ids00). Without
+texts= it uses the eight A/B texts; the long set takes
+texts=build,basement,airport,next-step,saturday,dentist.
 """
 import csv
 import random
@@ -15,8 +17,11 @@ from pathlib import Path
 
 listen, blind, key_path = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
 blind.mkdir(parents=True, exist_ok=True)
+args = sys.argv[4:]
 texts = ["short", "long", "yes", "hello", "question", "numbers", "commas", "paragraph"]
-pairs = [tuple(spec.split(":")) for spec in sys.argv[4:]] or [
+if args and args[0].startswith("texts="):
+    texts = args.pop(0)[len("texts="):].split(",")
+pairs = [tuple(spec.split(":")) for spec in args] or [
     ("ids12", "A_aufklarer-5s", "X1_eliza-5s-fp32"),
     ("ids00", "A0_aufklarer-5s_pad0", "X2_eliza-5s-fp32_pad0"),
 ]
