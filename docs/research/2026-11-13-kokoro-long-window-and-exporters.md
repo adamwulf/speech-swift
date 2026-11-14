@@ -329,6 +329,8 @@ Re-rendering the long set with the fix showed:
 
 This also explains why multi-chunk fp16 renders came out longer, as noted in section 4. The seam trimmer counted the burst as sound, so it kept the lead-in silence around it.
 
+In a before/after listen of three 10 s and one 5 s fp16 render, the listener found the fixed renders "much better".
+
 ### Still open
 
 - The CPU fp16 noise floor in silences. Its effect on seams turned out to be the lead-in burst, now silenced in Swift. To remove the floor itself, keep the vocoder's last stage (the 24,001-sample convolutions) in fp32.
