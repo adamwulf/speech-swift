@@ -11,6 +11,7 @@ Research notes from 2026-11-13. They cover three questions:
 - `KokoroTTSModel` now loads any end-to-end Kokoro bundle through `fromPretrained(modelFile:)`. It reads the token slots, the output window and whether a `speed` input exists from the model. The chunk budget follows from the window: 56/64 tokens for `kokoro_5s`, 201/230 for FluidAudio's `kokoro_21_15s`. See [kokoro-tts.md](../models/kokoro-tts.md#other-end-to-end-bundles).
 - In listening tests, every configuration of the FluidAudio graphs sounded warbly or odd next to `kokoro_5s`. The likely cause is that FluidAudio's export runs its bidirectional LSTMs over the padding, which `kokoro_5s` does not. Random phases, fp16 on the Neural Engine, BOS/EOS ids and the voice row are not the cause.
 - The exporter behind `kokoro_5s` lives in soniqo's private `speech-models` repository and is not public. The closest public match is elizaOS's fused end-to-end CoreML exporter. It masks all six LSTMs and takes the window and token count as flags. The next step, an A/B of a 5 s export against `kokoro_5s`, is planned in [kokoro-e2e-5s-export-ab.md](../plans/kokoro-e2e-5s-export-ab.md).
+- 2026-11-14: that export, with three fixes, beat `kokoro_5s` in blind listening and also runs in fp16 on the CPU (section 4). At 15 s it renders long sentences in one pass and won every blind long-sentence pair, against both our 5 s fp16 and `kokoro_5s`. The 10 s graph won 5 of 6 against 5 s (section 5).
 
 ## 1. Running a 15 s graph
 
@@ -256,8 +257,56 @@ Blind listening against `kokoro_5s`, same eight texts, BOS / EOS 1 / 2:
 
 The one loss, "Yes.", is the shortest clip, where the CPU build's higher noise floor in silence is most exposed. Across the three blind tests, the export was preferred or tied in every pair but that one.
 
+## 5. 10 s and 15 s exports (2026-11-14)
+
+The same exporter and fixes, at `--seconds 10 --tokens 168` and `--seconds 15 --tokens 249`, each in fp32 and fp16dec (`KOKORO_FP32_AXES=9,11`). All four keep the `speed` input.
+
+| Graph | Token slots | Output samples | Chunk budget / hard cap | Weights |
+|---|---|---|---|---|
+| 5 s | 128 | 120,000 | 56 / 64 | fp32 327 MB, fp16 233 MB |
+| 10 s | 168 | 240,000 | 125 / 143 | fp32 329 MB, fp16 234 MB |
+| 15 s | 249 | 360,000 | 194 / 222 | fp32 331 MB, fp16 236 MB |
+
+The window barely changes the size: the weights are the same, and only the constant index tables grow.
+
+Parity against torch, CPU only (`parity_coreml.py`). Every graph matches the torch durations exactly, with no NaN:
+
+| Graph | Waveform corr | Spectral corr | ms per pass (Python) |
+|---|---|---|---|
+| 10 s fp32 | 0.9978 | 0.9996 | 829 |
+| 10 s fp16 | 0.9776 | 0.9974 | 580 |
+| 15 s fp32 | 0.9977 | 0.9996 | 1,630 |
+| 15 s fp16 | 0.9918 | 0.9985 | 888 |
+
+A pass costs the full window whatever the input length. In the Swift harness, a one-word reply on the 15 s fp16 graph takes about 1 s, against about 0.6 s on the 10 s graph.
+
+### Long-sentence listening set
+
+Six single sentences of about 120-200 phoneme tokens (`KOKORO_LISTENING_SET=long`), each 8-11 s of speech:
+
+- The 5 s graphs render each sentence in 4-5 pieces.
+- The 10 s graph renders each in 2-3 pieces.
+- The 15 s graph renders each in one piece, except the longest, which takes 2.
+
+Total render time is about the same: around 1.2 s per sentence for 5 s fp16 and 1.1-1.8 s for 15 s fp16, all on the CPU. The difference is time to first audio. Chunked 5 s output plays its first piece after about 0.3 s; the 15 s graph plays nothing until the whole sentence is done. The chunked renders also come out 0.6-0.8 s longer, from the pauses between pieces.
+
+Blind listening, fp16dec on the CPU, BOS / EOS 1 / 2, sides shuffled:
+
+| Pair | Result |
+|---|---|
+| 5 s fp16 vs 10 s fp16 | 10 s preferred 5, 5 s preferred 1 |
+| 5 s fp16 vs 15 s fp16 | 15 s preferred 6 of 6 (3 "way better") |
+| `kokoro_5s` vs 15 s fp16 | 15 s preferred 6 of 6 (2 "way better") |
+
+- The listener's reasons were intonation and seams. The chunked renders "sound stitched", and in one of them a seam cut off the end of a word. The one 15 s render that took 2 pieces "sounds split in half", but was still preferred to the 4-piece versions.
+- Five of the six 10 s fp16 renders had faint static, twice described as "between chops". None of the 5 s fp16 or 15 s fp16 renders did, although they come from the same fp16 recipe.
+- On one sentence, the listener rated the 15 s render the best of all six files for that sentence and `kokoro_5s` the worst.
+
+So for long sentences, one pass through a longer window clearly beats chunking at 5 s. The cost is latency to first audio. Picking the graph by input length fits that trade-off: a 5 s graph for replies that fit one 5 s chunk, a 15 s graph for longer ones.
+
 ### Still open
 
 - The CPU fp16 noise floor. To remove it: keep the vocoder's last stage (the 24,001-sample convolutions) in fp32, or lower the seam trimmer's threshold for this graph.
+- The static heard in the 10 s fp16 renders is not explained yet. Their lead-in noise (about -59 dBFS) is no higher than the 5 s fp16 graph's (about -56 dBFS), and the 15 s fp16 lead-in is silent. The next check is the audio at the 10 s seams themselves.
 - Neural Engine use would need a different graph structure, such as a split pipeline like mattmireles/kokoro-coreml's. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
