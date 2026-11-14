@@ -136,7 +136,7 @@ Each chunk renders as a complete utterance, with about 250 ms of the graph's lea
 
 Pieces are joined end to end, not crossfaded. Every piece after the first gets a 5 ms fade-in, and an end whose silence was cut gets a 5 ms fade-out. These fades only guard against clicks: they run over audio already below the silence threshold, and they stay 5 ms at every speed. Pauses still scale with speed: the model divides its own lead-in and pauses by `speed`, and the trim divides the silence it keeps.
 
-An fp16 graph running on the CPU can open each pass with a faint burst of noise, followed by digital silence, then the speech. Digital silence here means below 16-bit resolution (about -90 dBFS), often exact zeros. The masked 10 s fp16 export's burst is about 27 ms at -50 to -53 dBFS RMS, and in blind listening it was heard as static "between chops". The 5 s fp16 export's burst is about 130 ms and quieter (-55 to -59 dBFS RMS). No fp32 graph has a pattern like this in its lead-in. So when a pass starts with audio under -40 dBFS RMS, followed within 200 ms by at least 20 ms of digital silence, that audio is zeroed (`KokoroLeadInBurst`). The timing is unchanged, and speech or an fp32 lead-in never matches this pattern.
+An fp16 graph running on the CPU can open each pass with a faint burst of noise. The masked 5 s fp16 export's burst is about 12 ms at -39 to -50 dBFS, and the 10 s fp16 export's about 27 ms at -42 to -60 dBFS. Before a silent lead-in, the 10 s burst was heard in blind listening as static "between chops". Before a short reply such as "Yes.", whose speech starts about 30 ms in, the burst lands on the onset. fp32 graphs, the 15 s fp16 export and fp16 on the Neural Engine start in silence (-85 dBFS or less). Kokoro gives the start token at least one 25 ms frame, so the first 25 ms of a pass is lead-in, never speech. When it is quieter than -30 dBFS RMS, it is zeroed and the next 5 ms fade in (`KokoroLeadInBurst`). The timing is unchanged, and on a graph without the burst this only clears silence.
 
 ## Other end-to-end bundles
 
@@ -305,7 +305,7 @@ Sources/KokoroTTS/
   KokoroVoice.swift          Voice files: embedding, per-length rows, voice filter
   TextChunker.swift          Sentence/clause/word chunking of long text (based on speech-core, with documented divergences)
   ChunkSeams.swift           Silence trim at chunk seams inside a sentence
-  LeadInBurst.swift          Silences an fp16 graph's noise burst at the start of a pass
+  LeadInBurst.swift          Clears the first 25 ms of a pass, where fp16 graphs emit a noise burst
   Phonemizer.swift           English G2P + multilingual routing (en/zh/ja/hi/fr/es/pt/it/de)
   GermanPhonemizer.swift     German: normalization + dict_de.json + inflection/compounds + rule-based G2P
   ChinesePhonemizer.swift    Chinese: CFStringTransform pinyin → IPA

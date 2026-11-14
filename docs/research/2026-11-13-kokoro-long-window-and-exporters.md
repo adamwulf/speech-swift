@@ -237,7 +237,7 @@ Results of the listening-set run (`E2EKokoroListeningSetTests`, same eight texts
 
 - **The Neural Engine is slower here, not faster.** The graph alternates between fp32 parts on the CPU (the text side, the phase path, the STFT in the middle of the vocoder) and fp16 parts on the Neural Engine. The handoffs cost more than the Neural Engine saves, and the first compile takes over an hour. This graph structure, one fused graph with thousands of unrolled LSTM ops, does not suit the Neural Engine.
 - **soniqo's `kokoro_5s` runs entirely on the CPU, even with `.cpuAndNeuralEngine`.** Core ML's `MLComputePlan` for that configuration puts all 8,732 non-const ops on the CPU (100% of estimated cost), and only 10 ops support the Neural Engine at all. The graph is fp32-typed, and the Neural Engine runs fp16 only. The fp32 export's plan is the same: all 37,981 ops on the CPU.
-- **fp16 on the CPU leaves a noise floor of about -55 dBFS in silences,** against -73 to -78 dBFS for the others. On the Neural Engine, fp16 shows no such floor, so this is presumably the CPU's fp16 accumulation. The floor sits at the seam trimmer's threshold (0.002 RMS, -54 dBFS), so seams inside a sentence are not trimmed and multi-chunk renders come out 0.2-0.6 s longer. It may also be audible as faint hiss in pauses.
+- **fp16 on the CPU leaves a noise floor of about -55 dBFS in silences,** against -73 to -78 dBFS for the others. (Later traced to a noise burst at the start of every pass, which `KokoroTTSModel` now clears; see section 5.) On the Neural Engine, fp16 shows no such floor, so this is presumably the CPU's fp16 accumulation. The floor sits at the seam trimmer's threshold (0.002 RMS, -54 dBFS), so seams inside a sentence are not trimmed and multi-chunk renders come out 0.2-0.6 s longer. It may also be audible as faint hiss in pauses.
 
 Blind listening against `kokoro_5s`, same eight texts, BOS / EOS 1 / 2:
 
@@ -255,7 +255,7 @@ Blind listening against `kokoro_5s`, same eight texts, BOS / EOS 1 / 2:
 - **fp16dec on the CPU:** preferred 6 times, tied once, lost once.
 - **fp16dec on the Neural Engine:** preferred 6 times, tied twice, lost none.
 
-The one loss, "Yes.", is the shortest clip, where the CPU build's higher noise floor in silence is most exposed. Across the three blind tests, the export was preferred or tied in every pair but that one.
+The one loss, "Yes.", is the shortest clip. Section 5 points to a likely cause: the CPU build's start-of-pass noise burst, which lands right on the onset of "Yes.". Across the three blind tests, the export was preferred or tied in every pair but that one.
 
 ## 5. 10 s and 15 s exports (2026-11-14)
 
@@ -304,35 +304,41 @@ Blind listening, fp16dec on the CPU, BOS / EOS 1 / 2, sides shuffled:
 
 So for long sentences, one pass through a longer window clearly beats chunking at 5 s. The cost is latency to first audio. Picking the graph by input length fits that trade-off: a 5 s graph for replies that fit one 5 s chunk, a 15 s graph for longer ones.
 
-### The 10 s static
+### The 10 s static: a burst at the start of every pass
 
-The static is a burst of noise at the very start of each pass. It comes before the graph's lead-in, and digital silence separates it from the speech: below 16-bit resolution (about -90 dBFS), often exact zeros. A scan of the long-set renders (16-bit WAVs) for short non-silent segments bounded by digital silence (at least 20 ms):
+On the CPU, the 5 s and 10 s fp16 graphs open every pass with a short burst of noise. The 2.5 ms envelope of the first 80 ms of each render:
 
-| Graph | Burst at the start of each pass |
+| Graph | Start of every pass |
 |---|---|
-| `kokoro_5s`, every fp32 export | none |
-| 15 s fp16 | none (its lead-in is digital silence) |
-| 5 s fp16 | 120-140 ms, peak -31 to -41 dBFS, RMS -55 to -59 dBFS |
-| 10 s fp16 | 27 ms, peak -39 to -42 dBFS, RMS -50 to -53 dBFS |
+| `kokoro_5s`, every fp32 export, FluidAudio's graphs | silent (-85 dBFS or less) for the first 25 ms |
+| 15 s fp16 on the CPU, 5 s fp16 on the Neural Engine | silent for the first 25 ms |
+| 5 s fp16 on the CPU | about 12 ms at -39 to -50 dBFS, then the graph's faint lead-in |
+| 10 s fp16 on the CPU | about 27 ms at -42 to -60 dBFS |
 
-A chunked render repeats the burst at every seam, between the zeroed tail of one piece and the lead-in of the next, which is where the listener heard it. The 5 s burst is longer but about 5 dB quieter, and spread over 130 ms. It was not noticed in any blind test. The 10 s burst is short and louder, so it reads as a click.
+What follows the burst depends on the text:
 
-The fix is in Swift, so the graphs stay as they are. When a pass starts with audio under -40 dBFS RMS, followed within 200 ms by at least 20 ms of digital silence, that audio is zeroed (`KokoroLeadInBurst`, called from `runModel`). No fp32 graph showed a sound-then-silence pattern in its lead-in, and speech is far louder than -40 dBFS, so neither matches. The timing is unchanged.
+- **Before a long lead-in** (most chunks), digital silence or the faint lead-in follows. The burst then stands alone, and a chunked render repeats it at every seam. That is where the listener heard static "between chops" on the 10 s graph, whose burst is longer and louder.
+- **Before a short reply** such as "Yes.", whose speech starts about 30 ms in, the burst runs straight into the onset. That is the likely reason the CPU fp16 build lost the "Yes." pair in section 4. The Neural Engine build, which has no burst, tied it.
+- **It also stretched multi-chunk renders.** The seam trimmer counted the burst as sound and kept the lead-in silence around it. Multi-chunk 5 s fp16 renders came out up to 0.6 s longer than fp32.
 
-A first version looked for exact zeros. The scan had been run on 16-bit WAVs, where anything under about -90 dBFS reads as zero, but in the float output the silence after the burst is not always exactly zero. That version removed the burst from only some passes, so the check now treats anything under 16-bit resolution as silence.
+The "-55 dBFS noise floor" reported for the CPU fp16 build in section 4 was this burst. That figure was the RMS of the first 150 ms, which on the 5 s graph is the burst plus faint lead-in.
 
-Re-rendering the long set with the fix showed:
+**The fix, in Swift.** Kokoro clamps every predicted duration to at least one 25 ms frame, so the start token fills at least the first 25 ms of a pass, and no phoneme is spoken there. So when the first 25 ms is quieter than -30 dBFS RMS, it is zeroed and the next 5 ms fade in (`KokoroLeadInBurst`, called from `runModel`). On a graph without the burst, this only clears what is already silence.
 
-- No burst remains in any 5 s or 10 s fp16 render.
-- The fp32 renders keep their durations exactly.
-- The fp16 renders now match the fp32 durations. 10 s fp16 "build" went from 8.11 s to 7.92 s, the same as fp32, and 5 s fp16 "build" from 8.74 s to 8.37 s.
+Re-rendering the eight A/B texts with the fix:
 
-This also explains why multi-chunk fp16 renders came out longer, as noted in section 4. The seam trimmer counted the burst as sound, so it kept the lead-in silence around it.
+- The first 25 ms is digital silence on every graph.
+- What remains at the old burst positions is at -71 to -79 dBFS RMS, down from -50 to -59.
+- "Yes." now starts in silence, and its onset matches the fp32 shape.
+- Every 5 s fp16 render now has the fp32 render's duration, within 0.01 s. The paragraph went from 11.88 s to 11.35 s, and the long sentence from 8.74 s to 8.12 s.
+- The fp32 renders are unchanged.
 
-In a before/after listen of three 10 s and one 5 s fp16 render, the listener found the fixed renders "much better".
+After the fix, the CPU fp16 lead-in sits at about -70 to -74 dBFS on the 5 s graph and about -99 dBFS on the 10 s graph, against -81 dBFS or less for fp32.
+
+Two earlier versions of the fix keyed on a run of digital silence after the burst. They missed short replies, where the burst runs into speech with no silence in between. In a before/after listen of three 10 s and one 5 s fp16 render, the listener found the renders from one of these earlier versions "much better".
 
 ### Still open
 
-- The CPU fp16 noise floor in silences. Its effect on seams turned out to be the lead-in burst, now silenced in Swift. To remove the floor itself, keep the vocoder's last stage (the 24,001-sample convolutions) in fp32.
+- The start-of-pass burst is cleared in Swift, not in the graphs. Its source inside the fp16 vocoder is not known. Other runtimes loading these graphs need the same 25 ms rule.
 - Neural Engine use would need a different graph structure, such as a split pipeline like mattmireles/kokoro-coreml's. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
