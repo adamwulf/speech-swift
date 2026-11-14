@@ -48,6 +48,13 @@ xcrun coremlcompiler compile out/fp32/kokoro_5s.mlpackage out/fp32/
 KOKORO_FP32_AXES=9,11 python export_e2e_coreml.py --stage full --seconds 5 --tokens 128 \
     --precision fp16dec --skip-load --out out/fp16dec
 python parity_coreml.py export_e2e_coreml.py out/fp16dec/kokoro_5s.mlpackage 128 200 cpu
+
+# 15 s window (10 s: --seconds 10 --tokens 168, parity 168 400):
+KOKORO_FP32_AXES=9,11 python export_e2e_coreml.py --stage full --seconds 15 --tokens 249 \
+    --precision fp16dec --skip-load --out out/fp16dec-15s
+python parity_coreml.py export_e2e_coreml.py out/fp16dec-15s/kokoro_15s.mlpackage 249 600 cpu
 ```
+
+The 5 s and 10 s fp16 graphs open each pass with a faint noise burst before digital silence; `KokoroTTSModel` silences it (`KokoroLeadInBurst`, see [kokoro-tts.md](../../docs/models/kokoro-tts.md#long-text)).
 
 The compiled `.mlmodelc` loads next to the aufklarer vocabulary, G2P and voice files, with `fromPretrained(modelFile:cacheDir:offlineMode: true)`. `E2EKokoroListeningSetTests` renders an A/B listening set from such a folder (set `KOKORO_LISTENING_DIR` and `KOKORO_AB_BUNDLE_DIR`).

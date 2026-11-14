@@ -288,6 +288,9 @@ public final class KokoroTTSModel {
             let ptr = result.audio.dataPointer.bindMemory(to: Float.self, capacity: validSamples)
             for i in 0..<validSamples { audio[i] = ptr[i] }
         }
+        // fp16 graphs can open with a faint noise burst before their lead-in
+        // silence, heard as a click at the start of every piece.
+        KokoroLeadInBurst.silence(&audio, sampleRate: config.sampleRate)
 
         // Kokoro's E2E model often emits 100–300 ms of trailing artifacts
         // past the real speech (random low-energy noise + an occasional

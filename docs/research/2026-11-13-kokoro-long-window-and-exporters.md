@@ -299,14 +299,38 @@ Blind listening, fp16dec on the CPU, BOS / EOS 1 / 2, sides shuffled:
 | `kokoro_5s` vs 15 s fp16 | 15 s preferred 6 of 6 (2 "way better") |
 
 - The listener's reasons were intonation and seams. The chunked renders "sound stitched", and in one of them a seam cut off the end of a word. The one 15 s render that took 2 pieces "sounds split in half", but was still preferred to the 4-piece versions.
-- Five of the six 10 s fp16 renders had faint static, twice described as "between chops". None of the 5 s fp16 or 15 s fp16 renders did, although they come from the same fp16 recipe.
+- Five of the six 10 s fp16 renders had faint static, twice described as "between chops". None of the 5 s fp16 or 15 s fp16 renders did, although they come from the same fp16 recipe. See "The 10 s static" below.
 - On one sentence, the listener rated the 15 s render the best of all six files for that sentence and `kokoro_5s` the worst.
 
 So for long sentences, one pass through a longer window clearly beats chunking at 5 s. The cost is latency to first audio. Picking the graph by input length fits that trade-off: a 5 s graph for replies that fit one 5 s chunk, a 15 s graph for longer ones.
 
+### The 10 s static
+
+The static is a burst of noise at the very start of each pass. It comes before the graph's lead-in, and digital silence separates it from the speech: below 16-bit resolution (about -90 dBFS), often exact zeros. A scan of the long-set renders (16-bit WAVs) for short non-silent segments bounded by digital silence (at least 20 ms):
+
+| Graph | Burst at the start of each pass |
+|---|---|
+| `kokoro_5s`, every fp32 export | none |
+| 15 s fp16 | none (its lead-in is digital silence) |
+| 5 s fp16 | 120-140 ms, peak -31 to -41 dBFS, RMS -55 to -59 dBFS |
+| 10 s fp16 | 27 ms, peak -39 to -42 dBFS, RMS -50 to -53 dBFS |
+
+A chunked render repeats the burst at every seam, between the zeroed tail of one piece and the lead-in of the next, which is where the listener heard it. The 5 s burst is longer but about 5 dB quieter, and spread over 130 ms. It was not noticed in any blind test. The 10 s burst is short and louder, so it reads as a click.
+
+The fix is in Swift, so the graphs stay as they are. When a pass starts with audio under -40 dBFS RMS, followed within 200 ms by at least 20 ms of digital silence, that audio is zeroed (`KokoroLeadInBurst`, called from `runModel`). No fp32 graph showed a sound-then-silence pattern in its lead-in, and speech is far louder than -40 dBFS, so neither matches. The timing is unchanged.
+
+A first version looked for exact zeros. The scan had been run on 16-bit WAVs, where anything under about -90 dBFS reads as zero, but in the float output the silence after the burst is not always exactly zero. That version removed the burst from only some passes, so the check now treats anything under 16-bit resolution as silence.
+
+Re-rendering the long set with the fix showed:
+
+- No burst remains in any 5 s or 10 s fp16 render.
+- The fp32 renders keep their durations exactly.
+- The fp16 renders now match the fp32 durations. 10 s fp16 "build" went from 8.11 s to 7.92 s, the same as fp32, and 5 s fp16 "build" from 8.74 s to 8.37 s.
+
+This also explains why multi-chunk fp16 renders came out longer, as noted in section 4. The seam trimmer counted the burst as sound, so it kept the lead-in silence around it.
+
 ### Still open
 
-- The CPU fp16 noise floor. To remove it: keep the vocoder's last stage (the 24,001-sample convolutions) in fp32, or lower the seam trimmer's threshold for this graph.
-- The static heard in the 10 s fp16 renders is not explained yet. Their lead-in noise (about -59 dBFS) is no higher than the 5 s fp16 graph's (about -56 dBFS), and the 15 s fp16 lead-in is silent. The next check is the audio at the 10 s seams themselves.
+- The CPU fp16 noise floor in silences. Its effect on seams turned out to be the lead-in burst, now silenced in Swift. To remove the floor itself, keep the vocoder's last stage (the 24,001-sample convolutions) in fp32.
 - Neural Engine use would need a different graph structure, such as a split pipeline like mattmireles/kokoro-coreml's. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.

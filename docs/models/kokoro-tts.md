@@ -134,6 +134,10 @@ Text within one chunk renders in a single call; longer text is split into chunks
 
 Each chunk renders as a complete utterance, with about 250 ms of the graph's lead-in silence before it and about 500 ms of zeroed trailing artifacts after it. Where a chunk ends inside a sentence, the seam is trimmed: to about 20 ms after a cut between words, in line with the gaps between words inside one chunk (most have none), and to about 160 ms after `,` `;` `:`, kept shorter than Kokoro's own comma pause inside one chunk (measured at 210-275 ms at speed 1). Both shrink at higher speeds. The trim counts a 10 ms window under 0.002 RMS as silence, below the level of soft onsets and endings (h, f, s, th), so the trim itself does not cut into them. Sentence ends keep the model's own pause. The pitch still resets at a seam, since each chunk is spoken as its own utterance.
 
+Pieces are joined end to end, not crossfaded. Every piece after the first gets a 5 ms fade-in, and an end whose silence was cut gets a 5 ms fade-out. These fades only guard against clicks: they run over audio already below the silence threshold, and they stay 5 ms at every speed. Pauses still scale with speed: the model divides its own lead-in and pauses by `speed`, and the trim divides the silence it keeps.
+
+An fp16 graph running on the CPU can open each pass with a faint burst of noise, followed by digital silence, then the speech. Digital silence here means below 16-bit resolution (about -90 dBFS), often exact zeros. The masked 10 s fp16 export's burst is about 27 ms at -50 to -53 dBFS RMS, and in blind listening it was heard as static "between chops". The 5 s fp16 export's burst is about 130 ms and quieter (-55 to -59 dBFS RMS). No fp32 graph has a pattern like this in its lead-in. So when a pass starts with audio under -40 dBFS RMS, followed within 200 ms by at least 20 ms of digital silence, that audio is zeroed (`KokoroLeadInBurst`). The timing is unchanged, and speech or an fp32 lead-in never matches this pattern.
+
 ## Other end-to-end bundles
 
 `fromPretrained(modelFile:)` names the end-to-end bundle to download and load, without `.mlmodelc`. It defaults to `kokoro_5s`, which every `aufklarer/Kokoro-82M-*` repo ships. Any bundle with the same inputs (`input_ids`, `attention_mask`, `ref_s`, `random_phases`, optionally `speed`) and outputs (`audio`, `audio_length_samples`, `pred_dur`) loads the same way; its phoneme slots, output window, and whether it takes `speed` are read from the model, and the chunk budget follows from them.
@@ -301,6 +305,7 @@ Sources/KokoroTTS/
   KokoroVoice.swift          Voice files: embedding, per-length rows, voice filter
   TextChunker.swift          Sentence/clause/word chunking of long text (based on speech-core, with documented divergences)
   ChunkSeams.swift           Silence trim at chunk seams inside a sentence
+  LeadInBurst.swift          Silences an fp16 graph's noise burst at the start of a pass
   Phonemizer.swift           English G2P + multilingual routing (en/zh/ja/hi/fr/es/pt/it/de)
   GermanPhonemizer.swift     German: normalization + dict_de.json + inflection/compounds + rule-based G2P
   ChinesePhonemizer.swift    Chinese: CFStringTransform pinyin → IPA
