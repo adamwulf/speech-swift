@@ -9,7 +9,7 @@ import AudioCommon
 /// wobble around a 50 ms average, in cents). Not a pass/fail test: it skips
 /// unless `KOKORO_LISTENING_DIR` names the folder to write the WAVs to.
 ///
-/// Two sets:
+/// Three sets:
 /// - Default: the warble set, `kokoro_5s` against FluidInference's
 ///   `kokoro_21_15s` / `kokoro_21_5s` under zero phases, CPU only, BOS/EOS 0
 ///   and the averaged voice (docs/research/2026-11-13-kokoro-long-window-and-exporters.md).
@@ -17,6 +17,10 @@ import AudioCommon
 ///   docs/plans/kokoro-e2e-5s-export-ab.md, loaded offline from that folder,
 ///   which holds `kokoro_5s.mlmodelc`, `kokoro_eliza_5s_fp32.mlmodelc`,
 ///   `kokoro_eliza_5s_fp16.mlmodelc` and the aufklarer vocabulary, G2P and voices.
+/// - With `KOKORO_AB_BUNDLE_DIR` and `KOKORO_LISTENING_SET=long`: long
+///   sentences rendered by the 5 s graphs in chunks and by the 10 s / 15 s
+///   exports (`kokoro_eliza_{10,15}s_{fp32,fp16}.mlmodelc`) in one pass. The
+///   fp16 graphs load with `.cpuOnly`, where they run fastest.
 ///
 /// Run with: KOKORO_LISTENING_DIR=/path swift test --filter E2EKokoroListeningSetTests
 final class E2EKokoroListeningSetTests: XCTestCase {
@@ -34,6 +38,29 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         ("commas", "Bring the charger, the blue folder, two pens, and, if you have room, the spare headphones."),
         ("paragraph", "The meeting starts at nine tomorrow morning. Please bring the budget report and the travel plans for next month. We will finish with a short review of the new product launch."),
     ]
+
+    /// Single sentences of about 120-200 phoneme tokens: several chunks on a
+    /// 5 s graph, one pass on a 15 s graph.
+    static let longTexts = [
+        ("build", "I checked the build server this morning, and both jobs finished without errors, so the new release is ready whenever you want to ship it."),
+        ("basement", "The team spent most of the afternoon looking through the old reports in the basement because nobody could remember where the original drawings for the north wing of the building had been stored after the move."),
+        ("airport", "If you leave now and the traffic on the bridge stays light, you should reach the airport about forty minutes before boarding, which leaves enough time to check your bag and grab a coffee."),
+        ("next-step", "So the next useful step is for you to run a few real conversations and tell me where the detection or the voice still feels off, and I'll send that straight to an agent."),
+        ("saturday", "My plan for Saturday is to sleep in, take the dog for a long walk by the river, and then spend the afternoon finally fixing the squeaky hinge on the back door."),
+        ("dentist", "Would you like me to move your dentist appointment to next Tuesday afternoon, or would you rather keep the original time and reschedule the team meeting instead?"),
+    ]
+
+    static func longConfigs(_ dir: URL) -> [Config] {
+        let local = "local/kokoro-ab"
+        return [
+            Config(name: "A_aufklarer-5s", modelId: local, modelFile: "kokoro_5s", units: .cpuAndNeuralEngine, cacheDir: dir),
+            Config(name: "X3c_eliza-5s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuOnly, cacheDir: dir),
+            Config(name: "L10_eliza-10s-fp32", modelId: local, modelFile: "kokoro_eliza_10s_fp32", units: .cpuAndNeuralEngine, cacheDir: dir),
+            Config(name: "L10h_eliza-10s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_10s_fp16", units: .cpuOnly, cacheDir: dir),
+            Config(name: "L15_eliza-15s-fp32", modelId: local, modelFile: "kokoro_eliza_15s_fp32", units: .cpuAndNeuralEngine, cacheDir: dir),
+            Config(name: "L15h_eliza-15s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_15s_fp16", units: .cpuOnly, cacheDir: dir),
+        ]
+    }
 
     struct Config {
         let name: String
@@ -86,8 +113,9 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         let outDir = URL(fileURLWithPath: out, isDirectory: true)
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let bundle = env["KOKORO_AB_BUNDLE_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
-        let configs = bundle.map(Self.abConfigs) ?? Self.warbleConfigs
-        let texts = bundle == nil ? Self.warbleTexts : Self.abTexts
+        let long = env["KOKORO_LISTENING_SET"] == "long"
+        let configs = bundle.map { long ? Self.longConfigs($0) : Self.abConfigs($0) } ?? Self.warbleConfigs
+        let texts = bundle == nil ? Self.warbleTexts : (long ? Self.longTexts : Self.abTexts)
 
         var loadedKey: String?
         var model: KokoroTTSModel?

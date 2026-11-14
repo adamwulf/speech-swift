@@ -235,7 +235,7 @@ Results of the listening-set run (`E2EKokoroListeningSetTests`, same eight texts
 | eliza fp16dec, `.cpuAndNeuralEngine` | ~995 | about 70 min first Neural Engine compile; noise floor about -73 dBFS |
 
 - **The Neural Engine is slower here, not faster.** The graph alternates between fp32 parts on the CPU (the text side, the phase path, the STFT in the middle of the vocoder) and fp16 parts on the Neural Engine. The handoffs cost more than the Neural Engine saves, and the first compile takes over an hour. This graph structure, one fused graph with thousands of unrolled LSTM ops, does not suit the Neural Engine.
-- **soniqo's `kokoro_5s` is fp32-typed almost throughout,** and runs at the fp32 export's speed, so it too runs mainly on the CPU.
+- **soniqo's `kokoro_5s` runs entirely on the CPU, even with `.cpuAndNeuralEngine`.** Core ML's `MLComputePlan` for that configuration puts all 8,732 non-const ops on the CPU (100% of estimated cost), and only 10 ops support the Neural Engine at all. The graph is fp32-typed, and the Neural Engine runs fp16 only. The fp32 export's plan is the same: all 37,981 ops on the CPU.
 - **fp16 on the CPU leaves a noise floor of about -55 dBFS in silences,** against -73 to -78 dBFS for the others. On the Neural Engine, fp16 shows no such floor, so this is presumably the CPU's fp16 accumulation. The floor sits at the seam trimmer's threshold (0.002 RMS, -54 dBFS), so seams inside a sentence are not trimmed and multi-chunk renders come out 0.2-0.6 s longer. It may also be audible as faint hiss in pauses.
 
 Blind listening against `kokoro_5s`, same eight texts, BOS / EOS 1 / 2:
