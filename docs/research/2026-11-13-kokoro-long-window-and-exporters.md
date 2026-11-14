@@ -238,11 +238,26 @@ Results of the listening-set run (`E2EKokoroListeningSetTests`, same eight texts
 - **soniqo's `kokoro_5s` is fp32-typed almost throughout,** and runs at the fp32 export's speed, so it too runs mainly on the CPU.
 - **fp16 on the CPU leaves a noise floor of about -55 dBFS in silences,** against -73 to -78 dBFS for the others. On the Neural Engine, fp16 shows no such floor, so this is presumably the CPU's fp16 accumulation. The floor sits at the seam trimmer's threshold (0.002 RMS, -54 dBFS), so seams inside a sentence are not trimmed and multi-chunk renders come out 0.2-0.6 s longer. It may also be audible as faint hiss in pauses.
 
-A blind set compares `kokoro_5s` with fp16dec on the CPU and with fp16dec on the Neural Engine, 8 texts each.
+Blind listening against `kokoro_5s`, same eight texts, BOS / EOS 1 / 2:
+
+| Text | fp16dec on the CPU | fp16dec on the Neural Engine |
+|---|---|---|
+| "Sure, I can do that." | export slightly better | export better |
+| 25-word sentence | export better | export much better |
+| "Yes." | `kokoro_5s` better | same |
+| "Hello there, how are you today?" | same | same |
+| Question | export better | export better |
+| Numbers and a time | export way better | export way better |
+| Commas | export slightly better | export slightly better |
+| Three sentences | export better | export way better |
+
+- **fp16dec on the CPU:** preferred 6 times, tied once, lost once.
+- **fp16dec on the Neural Engine:** preferred 6 times, tied twice, lost none.
+
+The one loss, "Yes.", is the shortest clip, where the CPU build's higher noise floor in silence is most exposed. Across the three blind tests, the export was preferred or tied in every pair but that one.
 
 ### Still open
 
-- The fp16 blind listening.
-- If the CPU fp16 noise floor is audible: keep the vocoder's last stage (the 24,001-sample convolutions) in fp32, or lower the seam trimmer's threshold for this graph.
+- The CPU fp16 noise floor. To remove it: keep the vocoder's last stage (the 24,001-sample convolutions) in fp32, or lower the seam trimmer's threshold for this graph.
 - Neural Engine use would need a different graph structure, such as a split pipeline like mattmireles/kokoro-coreml's. The unwrapped phase reaches about 220,000 rad, because each unvoiced sample with slightly negative F0 adds about one cycle. That needs soniqo's per-sample wrap, or the phase path kept in fp32.
 - An ASR round trip.
