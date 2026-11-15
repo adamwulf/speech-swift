@@ -28,10 +28,11 @@ enum KokoroChunkSeams {
     /// together. It is kept shorter than Kokoro's own comma pause inside one
     /// chunk, measured at 210-275 ms at speed 1 (165-210 ms at speed 1.2).
     static let clauseGapSeconds = 0.160
-    /// Lead-in silence kept before the first piece's speech at speed 1. With
-    /// BOS/EOS 0 the start token's lead-in grows to about 450 ms on a short
-    /// reply; cutting it keeps the model's onset without the wait. With BOS
-    /// 1 the lead-in is already about 75-125 ms, so this rarely cuts.
+    /// Lead-in silence kept before the first piece's speech at speed 1, on
+    /// every graph. With boundary token 0 the masked exports' lead-in grows
+    /// to about 450 ms before a short reply; soniqo's `kokoro_5s` opens with
+    /// about 250 ms; the masked exports with BOS 1 with about 75-125 ms,
+    /// which is left alone. Cutting keeps the model's onset without the wait.
     static let leadInSeconds = 0.100
     /// A 10 ms window below this RMS is silence. The graph's lead-in sits
     /// under 0.001; soft onsets and endings (h, f, s, th) rise above this
