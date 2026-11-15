@@ -186,7 +186,7 @@ The larger graph is faster for long sentences and slower for short replies. Load
 | `kokoro_masked_10s_fp16` | 168 | 240 000 samples (10.0 s) | 125 | 143 |
 | `kokoro_masked_15s_fp16` | 249 | 360 000 samples (15.0 s) | 194 | 222 |
 
-Load the fp16 models with `computeUnits: .cpuOnly`. With `.cpuAndNeuralEngine`, the first load runs a Neural Engine compile of over an hour, and each pass is about 5 times slower. Blind listening and measurements are in [the research notes](../research/2026-11-13-kokoro-long-window-and-exporters.md).
+Load the fp16 models with `computeUnits: .cpuOnly`. With `.cpuAndNeuralEngine`, the first load runs a Neural Engine compile of over an hour, and each pass is about 5 times slower. With `.cpuOnly`, Core ML's first on-device build of a model takes about 0.5 s on a Mac. Each graph has about 5,000 operations, its LSTMs being native `lstm` ops. Files published before 2026-11-15 unrolled them into 50,000-105,000 operations and took 10-54 s on a Mac, and minutes on an iPhone. Blind listening and measurements are in [the research notes](../research/2026-11-13-kokoro-long-window-and-exporters.md).
 
 Three settings shape short replies:
 

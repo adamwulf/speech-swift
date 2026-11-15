@@ -11,6 +11,7 @@ Edit it here, then upload it. Do not edit it on the Hub.
 | `55224889022bfbf517bd8e9d86dc829575f0933b` | First upload: `kokoro_masked_5s`, `kokoro_masked_5s_fp16`, `kokoro_masked_15s_fp16`, shared files, `export/` |
 | `4f34ae2a4f2a5985114eef59fcd07d7c71e02b11` | Added `kokoro_masked_10s_fp16`; model card updated to match `Kokoro-82M-CoreML-Masked/README.md` |
 | `d8b3a084a4f3945a76f085605fd2e29a795181d7` | Voices gained the 510 per-length style rows (`make_voice_rows.py`); card documents rows, boundary token 0 and the lead-in cut |
+| `3edb3263fa034ed05e8428930adeb30c9dae9999` | All four models re-exported with native LSTM ops (local change 8): same output, about 5,000 operations each, first load about 0.5 s on a Mac; `export/` gained `check_native_lstm.py` and `load_time.py` |
 
 ## Repository layout
 
@@ -23,7 +24,7 @@ Edit it here, then upload it. Do not edit it on the Hub.
 | `kokoro_masked_15s_fp16.mlmodelc` | 15 s fp16dec export: same, `--seconds 15 --tokens 249` |
 | `G2PEncoder.mlmodelc`, `G2PDecoder.mlmodelc`, `vocab_index.json`, `g2p_vocab.json`, `us_gold.json`, `us_silver.json` | Unchanged copies from [aufklarer/Kokoro-82M-CoreML](https://huggingface.co/aufklarer/Kokoro-82M-CoreML) |
 | `voices/*.json` | aufklarer's voice files with hexgrad/Kokoro-82M's 510 per-length rows added: `python make_voice_rows.py <hexgrad voices/> <aufklarer voices/> <out>` (fails unless every voice has a tensor whose row mean equals its `embedding`) |
-| `export/export_e2e_coreml.py`, `export/export_e2e_coreml.local.patch`, `export/custom_stft.coreml.patch`, `export/parity_coreml.py`, `export/LICENSE-elizaOS-eliza` | Copies of the same files in `scripts/kokoro_coreml_export/` |
+| `export/export_e2e_coreml.py`, `export/export_e2e_coreml.local.patch`, `export/custom_stft.coreml.patch`, `export/parity_coreml.py`, `export/check_native_lstm.py`, `export/load_time.py`, `export/LICENSE-elizaOS-eliza` | Copies of the same files in `scripts/kokoro_coreml_export/` |
 
 Each export must pass `parity_coreml.py` (durations match torch, no NaN) before it is compiled and staged. The export commands and their parity arguments are in `../README.md`.
 

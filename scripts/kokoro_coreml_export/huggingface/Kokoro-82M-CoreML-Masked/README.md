@@ -27,16 +27,16 @@ End-to-end CoreML exports of [hexgrad/Kokoro-82M](https://huggingface.co/hexgrad
 |---|---|---|---|---|
 | `kokoro_masked_5s.mlmodelc` | 5 s, 128 phoneme tokens | fp32 | 327 MB | ~270 ms |
 | `kokoro_masked_5s_fp16.mlmodelc` | 5 s, 128 phoneme tokens | fp16 decoder | 233 MB | ~200 ms |
-| `kokoro_masked_10s_fp16.mlmodelc` | 10 s, 168 phoneme tokens | fp16 decoder | 234 MB | ~0.6 s |
-| `kokoro_masked_15s_fp16.mlmodelc` | 15 s, 249 phoneme tokens | fp16 decoder | 236 MB | ~0.9-1.4 s |
+| `kokoro_masked_10s_fp16.mlmodelc` | 10 s, 168 phoneme tokens | fp16 decoder | 234 MB | ~0.4 s |
+| `kokoro_masked_15s_fp16.mlmodelc` | 15 s, 249 phoneme tokens | fp16 decoder | 236 MB | ~0.65 s |
 
-All render 24 kHz audio and require iOS 18+ or macOS 15+. Times are from one Apple Silicon Mac.
+All render 24 kHz audio and require iOS 18+ or macOS 15+. Times are from one Apple Silicon Mac. Each model has about 5,000 Core ML operations, and its first load with `.cpuOnly` (Core ML's one-time on-device build) takes about 0.5 s on that Mac. Files published before 2026-11-15 unrolled their LSTMs into 50,000-105,000 operations and took 10-54 s to load the first time on the Mac, and minutes on an iPhone. Download again if you have those cached.
 
 ## Why masked LSTMs
 
 An end-to-end graph has fixed input shapes, so short text arrives padded. Kokoro's bidirectional LSTMs (the text encoder, the duration encoder and predictor, and the frame-level F0/N predictor) read that padding in their backward direction unless the export prevents it. When they do, predicted durations come out short and the pitch contour unsteady: speech that is rushed and "warbly", worst on short replies.
 
-In these exports every bidirectional LSTM holds its state on padded steps, which matches PyTorch's packed sequences for right-padded input, and the decoder's AdaIN statistics are taken over valid frames only. Predicted durations match upstream Kokoro exactly.
+In these exports every bidirectional LSTM ignores the padding, which matches PyTorch's packed sequences for right-padded input. Each direction is one Core ML `lstm` operation: the forward one runs over the whole input, where the padding comes last, and the backward one runs over the valid tokens reversed in place. The decoder's AdaIN statistics are taken over valid frames only. Predicted durations match upstream Kokoro exactly.
 
 ## Which model
 
@@ -106,7 +106,7 @@ Load the fp16 models with `.cpuOnly`. With `.cpuAndNeuralEngine`, the first load
 
 ## Quality
 
-All blind tests used voice `af_heart` at speed 1, the same text chunking, voice file and post-processing on both sides, and shuffled, unlabeled pairs.
+All blind tests used voice `af_heart` at speed 1, the same text chunking, voice file and post-processing on both sides, and shuffled, unlabeled pairs. They were run on the files published before 2026-11-15. The current files compute the same thing with native LSTM operations: on identical inputs they give the same durations, and their audio correlates with the earlier files' at 0.9987-0.9999.
 
 Against `kokoro_5s` from aufklarer/Kokoro-82M-CoreML, the most natural-sounding end-to-end Kokoro CoreML graph we had found, on eight English texts from "Yes." to three sentences:
 
@@ -133,7 +133,7 @@ Against PyTorch, every model's predicted durations match exactly. The audio corr
 ## Limitations
 
 - **fp16 start-of-pass burst.** On the CPU, `kokoro_masked_5s_fp16` opens each pass with a faint burst of noise, about 12 ms at -39 to -50 dBFS, and `kokoro_masked_10s_fp16` with about 27 ms at -42 to -60 dBFS. It repeats at every chunk seam, where the 10 s burst is heard as static, and on a short reply it lands just before the speech onset. speech-swift clears it. Another runtime should do the same: the start token always lasts at least one 25 ms frame, so zero the first 25 ms of each pass when it is quieter than -30 dBFS RMS, and fade in over the next 5 ms. `kokoro_masked_15s_fp16` and the fp32 model start in silence. With the burst cleared, the 5 s fp16 lead-in sits at about -70 to -74 dBFS and the 10 s fp16 lead-in at about -99 dBFS, against -81 dBFS or less for fp32.
-- **Fixed cost per pass.** A pass renders the whole window, so a one-word reply costs as much as a full window: about 200 ms for 5 s fp16, about 0.6 s for 10 s fp16, about 1 s for 15 s fp16.
+- **Fixed cost per pass.** A pass renders the whole window, so a one-word reply costs as much as a full window: about 200 ms for 5 s fp16, about 0.4 s for 10 s fp16, about 0.65 s for 15 s fp16.
 - Speed, battery use and heat on iPhone have not been measured yet.
 
 ## How they were exported
@@ -154,10 +154,12 @@ The `export/` folder holds:
 - `export_e2e_coreml.local.patch`: the same changes as a diff against eliza's file.
 - `custom_stft.coreml.patch`: eliza's patch to mattmireles' `kokoro/custom_stft.py`.
 - `parity_coreml.py`: compares a converted model with PyTorch on the CPU and on CPU + Neural Engine.
+- `check_native_lstm.py`: checks the exporter's native LSTMs against PyTorch's packed sequences.
+- `load_time.py`: counts a compiled model's operations and times its first and second load.
 
 To re-export, set `KOKORO_COREML_REF` to the mattmireles checkout (with `checkpoints/config.json` and `checkpoints/kokoro-v1_0.pth`) and `KOKORO_COREML_HEXGRAD` to a hexgrad/Kokoro-82M download, apply the STFT patch, and run the exporter with the commands above.
 
-The local changes to eliza's exporter, needed with coremltools 8.3:
+The local changes to eliza's exporter (1-7 are needed with coremltools 8.3; 8 makes the models load quickly):
 
 1. **The harmonic source.** `(f0 / sr) % 1` converts wrongly and zeroes the harmonic source; it is replaced by `x - floor(x)`, the same value.
 2. **The AdaIN frame mask.** It is stretched with `F.interpolate(mode="nearest")`, which converts one sample short; it is replaced by a constant-index gather with PyTorch's exact nearest indices.
@@ -166,6 +168,7 @@ The local changes to eliza's exporter, needed with coremltools 8.3:
 5. **fp16-safe AdaIN statistics**, with identical math: means divided by the valid fraction rather than sums divided by a count, since a sum over 24,001 samples overflows fp16, and the variance taken on `(x - mean) / 16`.
 6. **`--skip-load`** saves without loading, to avoid the long Neural Engine compile during conversion.
 7. **`--precision fp16mix`**, an earlier attempt not used for these files.
+8. **Native LSTMs.** eliza's exporter unrolls every bidirectional LSTM one time step at a time, which turned into 50,000-105,000 Core ML operations and a slow first load. Each direction is now one native LSTM: the forward one over the whole padded input, the backward one over each sequence's valid steps reversed in place with a gather and put back in order. The outputs match PyTorch's packed sequences within 2e-6.
 
 ## License
 
