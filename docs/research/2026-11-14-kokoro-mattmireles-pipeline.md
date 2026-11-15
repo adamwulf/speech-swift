@@ -204,7 +204,18 @@ All 14 stock candidates, six selected `.all` long candidates, diagnostic alterna
 
 The existing `make_blind_set.py` was run separately for the default eight labels and for `texts=build,basement,airport,next-step,saturday,dentist`. References were copied from exactly `listen-ab-burstfix3/` and `listen-long-burstfix2/`; they were not regenerated. The text labels and sentences came from the existing listening fixture.[^12]
 
-**Listening status: blind ratings pending.** Numerical sanity and placement are established; an equal-or-better sound-quality claim is not.
+### Blind results
+
+| Set | Split pipeline preferred | Ours preferred | Tie |
+|---|---|---|---|
+| Eight A/B texts: stock `M_default` vs our 5 s fp16 | 5 (hello, paragraph, question, short, "Yes.") | 2 (commas, long) | 1 (numbers) |
+| Six long sentences: `.all` `M_all` vs our 15 s fp16 | 0 | 6 (saturday only "slightly", "probably equally good") | 0 |
+
+- **Numbers pair:** the tie is not a fair comparison. Our side read the digits raw, because this package's English front end does not spell out numbers. The split SDK's Misaki front end does.
+- **Paragraph:** the split render was preferred "even though it has more pauses".
+- **Long sentences:** our one-pass 15 s render was preferred every time. That fits the split SDK's 128-token ceiling, which cuts these sentences into two or three chunks with pauses between them.
+
+The short-text preference is not attributable to the split export alone. The two sides also differ in front end (Misaki vs this package's phonemizer), BOS/EOS (0 vs 1/2) and voice selection. The split SDK picks the voice's per-length style row. This package's aufklarer voice files hold only the mean embedding, so every chunk uses the same style. Per-length rows are the cheapest of these to test: `KokoroVoice` already uses rows when a voice file has them, and hexgrad's voice tensors hold all 510.
 
 ## Recommendation
 
@@ -216,7 +227,7 @@ Build a split-export prototype while retaining our published models as the refer
 
 Preserve our phonemizer, boundary convention, voice selection and long-window chunk policy in that prototype so quality comparisons isolate the export. The current upstream SDK's 128-token limit and pause behavior are not reasons to discard our long-window quality gains.
 
-Adoption should require matched-input duration/parity tests and blind listening preferences. This experiment clears the **hardware placement, compilation and speed** questions. It leaves the **short-speech rate and perceptual quality** questions open.
+Blind listening (above) preferred the split pipeline on five of eight short texts and our 15 s export on all six long sentences. Before attributing the short-text result to the export, test our graphs with per-length voice rows. Adoption should require matched-input duration/parity tests and blind listening preferences. This experiment clears the **hardware placement, compilation and speed** questions. It leaves the **short-speech rate and perceptual quality** questions open.
 
 ## Reproduction evidence
 
