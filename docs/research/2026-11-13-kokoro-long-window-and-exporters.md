@@ -205,9 +205,9 @@ The export was preferred in 9 of 16 pairs and tied in 7. `kokoro_5s` was not pre
 
 This passes Gate 2: the eliza exporter, with the three fixes above, is at least as good as `kokoro_5s` at the same 5 s window. The next step is the same export at 10 s and 15 s.
 
-### Publishing (staged, not uploaded)
+### Publishing
 
-The fp32 export is staged for Hugging Face as `milestonemade/Kokoro-82M-CoreML-Masked`. The model is renamed `kokoro_masked_5s.mlmodelc`, and the folder is laid out like aufklarer/Kokoro-82M-CoreML: the same vocabulary, dictionaries, G2P and 54 voices. It adds a model card with the A/B results and provenance, plus an `export/` folder holding the patched exporter (with eliza's MIT license), the patches and the parity script. `scripts/kokoro_coreml_export/` in this repository holds the same recipe. Once uploaded, the model loads with `fromPretrained(modelId: "milestonemade/Kokoro-82M-CoreML-Masked", modelFile: "kokoro_masked_5s")`.
+Published on 2026-11-14 at [milestonemade/Kokoro-82M-CoreML-Masked](https://huggingface.co/milestonemade/Kokoro-82M-CoreML-Masked), with four models: `kokoro_masked_5s` (fp32), `kokoro_masked_5s_fp16`, `kokoro_masked_10s_fp16` and `kokoro_masked_15s_fp16` (sections 4 and 5). The repository is laid out like aufklarer/Kokoro-82M-CoreML: the same vocabulary, dictionaries, G2P and 54 voices. It adds a model card with the blind results, the start-of-pass burst rule and the provenance. It also has an `export/` folder holding the patched exporter (with eliza's MIT license), the patches and the parity script. `scripts/kokoro_coreml_export/` in this repository holds the same recipe. Each model loads with `fromPretrained(modelId: "milestonemade/Kokoro-82M-CoreML-Masked", modelFile: "<name>")`. All four were checked by downloading them from the Hub that way and rendering a sentence.
 
 ### fp16 (2026-11-14)
 

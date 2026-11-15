@@ -175,6 +175,17 @@ The larger graph is faster for long sentences and slower for short replies. Load
 
 `voiceFilter` takes shell patterns on voice ids (`a*`, `bf_emma`) and limits both which `voices/<id>.json` files are downloaded and which are loaded from the cache. `nil`, the default, takes every voice.
 
+`milestonemade/Kokoro-82M-CoreML-Masked` holds end-to-end exports whose LSTMs ignore the input padding, made with the recipe in `scripts/kokoro_coreml_export/`. All of them take `speed`, and they share aufklarer's vocabulary, G2P and voices:
+
+| `modelFile` | Phoneme slots | Output window | Budget | Hard cap |
+|---|---|---|---|---|
+| `kokoro_masked_5s` (fp32) | 128 | 120 000 samples (5.0 s) | 56 | 64 |
+| `kokoro_masked_5s_fp16` | 128 | 120 000 samples (5.0 s) | 56 | 64 |
+| `kokoro_masked_10s_fp16` | 168 | 240 000 samples (10.0 s) | 125 | 143 |
+| `kokoro_masked_15s_fp16` | 249 | 360 000 samples (15.0 s) | 194 | 222 |
+
+Load the fp16 models with `computeUnits: .cpuOnly`. With `.cpuAndNeuralEngine`, the first load runs a Neural Engine compile of over an hour, and each pass is about 5 times slower. Blind listening and measurements are in [the research notes](../research/2026-11-13-kokoro-long-window-and-exporters.md).
+
 ## Phonemizer
 
 Three-tier pipeline, all Apache-2.0 licensed (no GPL dependencies):
