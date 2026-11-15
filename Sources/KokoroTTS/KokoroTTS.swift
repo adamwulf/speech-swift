@@ -301,47 +301,9 @@ public final class KokoroTTSModel {
         // silence, heard as a click at the start of every piece.
         KokoroLeadInBurst.silence(&audio, sampleRate: config.sampleRate)
 
-        // Kokoro's E2E model often emits 100–300 ms of trailing artifacts
-        // past the real speech (random low-energy noise + an occasional
-        // loud-spike click, observed on iPhone playback). Find where real
-        // speech actually ended by walking backwards through 10 ms windows
-        // and locating the last window above a silence-energy threshold —
-        // then zero everything past that, plus a short ramp-down on the
-        // last few ms of real speech to avoid a click at the new boundary.
-        // Use a 50 ms window with a higher silence floor and require the
-        // window to be SUSTAINED above threshold — Kokoro's trailing
-        // artifacts are often a single 10–20 ms spike with low surrounding
-        // energy, so a tight short window otherwise mistakes them for
-        // speech. Real speech tails consistently above ~0.03 RMS over a
-        // 50 ms span; isolated artifact spikes don't. Soft word endings
-        // (German "Tisch", "Hamburg") fall under 0.030, so the floor is 0.015;
-        // lower values only keep more tail.
-        let win = max(1, Int(0.050 * Double(config.sampleRate)))
-        let silenceRMS: Float = 0.015
-        var speechEnd = validSamples
-        var i = validSamples - win
-        while i > 0 {
-            var sumSq: Float = 0
-            for j in 0..<win { let v = audio[i + j]; sumSq += v * v }
-            let rms = sqrt(sumSq / Float(win))
-            if rms > silenceRMS { speechEnd = i + win; break }
-            i -= win / 2  // 50 % overlap so we don't miss a window boundary
-        }
-        // Zero the trailing artifact region.
-        if speechEnd < validSamples {
-            for k in speechEnd..<validSamples { audio[k] = 0 }
-        }
-        // Linear fade-out on the last ~10 ms of the kept signal so the
-        // boundary between speech and the silenced region is also smooth.
-        let fadeSamples = min(speechEnd, Int(0.010 * Double(config.sampleRate)))
-        if fadeSamples >= 2 {
-            let start = speechEnd - fadeSamples
-            let denom = Float(fadeSamples - 1)
-            for k in 0..<fadeSamples {
-                let gain = Float(fadeSamples - 1 - k) / denom
-                audio[start + k] *= gain
-            }
-        }
+        // Zero the low-energy artifacts the graph can leave after the speech,
+        // keeping a soft final consonant that runs on from it.
+        let speechEnd = KokoroTrailingArtifacts.clear(&audio, speed: speed, sampleRate: config.sampleRate)
         // The vocoder is not bounded to +-1: the packed-LSTM models occasionally
         // overshoot by a few percent. Clamp so callers get valid float PCM.
         for k in 0..<speechEnd { audio[k] = min(1, max(-1, audio[k])) }
