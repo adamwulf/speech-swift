@@ -55,6 +55,18 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         ("dentist", "Would you like me to move your dentist appointment to next Tuesday afternoon, or would you rather keep the original time and reschedule the team meeting instead?"),
     ]
 
+    /// Parenthetical asides, each also with a comma typed before the `(`.
+    static let parenTexts = [
+        ("meeting", "The meeting (which was supposed to be short) ran for almost two hours."),
+        ("meeting-comma", "The meeting, (which was supposed to be short) ran for almost two hours."),
+        ("laptop", "Bring your laptop (and the charger) to the review tomorrow."),
+        ("laptop-comma", "Bring your laptop, (and the charger) to the review tomorrow."),
+        ("roommate", "I talked to Sam (my old roommate from college) about the trip."),
+        ("roommate-comma", "I talked to Sam, (my old roommate from college) about the trip."),
+        ("tip", "The total came to forty dollars (plus tip)."),
+        ("tip-comma", "The total came to forty dollars, (plus tip)."),
+    ]
+
     static func longConfigs(_ dir: URL) -> [Config] {
         let local = "local/kokoro-ab"
         return [
@@ -122,12 +134,14 @@ final class E2EKokoroListeningSetTests: XCTestCase {
         let outDir = URL(fileURLWithPath: out, isDirectory: true)
         try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
         let bundle = env["KOKORO_AB_BUNDLE_DIR"].flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
-        let long = env["KOKORO_LISTENING_SET"] == "long"
+        let set = env["KOKORO_LISTENING_SET"]
+        let long = set == "long" || set == "parens"
         let allConfigs = bundle.map { long ? Self.longConfigs($0) : Self.abConfigs($0) } ?? Self.warbleConfigs
         // KOKORO_LISTENING_CONFIGS: comma-separated config names to render; default all.
         let only = Set((env["KOKORO_LISTENING_CONFIGS"] ?? "").split(separator: ",").map(String.init))
         let configs = only.isEmpty ? allConfigs : allConfigs.filter { only.contains($0.name) }
-        let texts = bundle == nil ? Self.warbleTexts : (long ? Self.longTexts : Self.abTexts)
+        let texts = bundle == nil ? Self.warbleTexts
+            : set == "parens" ? Self.parenTexts : (long ? Self.longTexts : Self.abTexts)
 
         var loadedKey: String?
         var model: KokoroTTSModel?

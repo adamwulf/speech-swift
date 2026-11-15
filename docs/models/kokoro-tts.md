@@ -194,6 +194,8 @@ Three-tier pipeline, all Apache-2.0 licensed (no GPL dependencies):
 2. **Suffix stemming** — Morphological decomposition for known suffixes
 3. **BART G2P** — Neural grapheme-to-phoneme fallback using a separate CoreML encoder-decoder model for OOV words
 
+Punctuation that the model has tokens for is passed through: `,` `.` `!` `?` `;` `:`, and `(` `)` (full-width `（` `）` map to the same tokens). With the parentheses, Kokoro sets an aside off with its own pause and intonation. Before they were passed through, it read the aside straight through, and in listening tests the native tokens sounded better than a comma typed before the `(`. English, French, Spanish, Portuguese, Italian and Hindi all pass them through. Other marks the vocabulary has (`—`, `…`, curly quotes) are still dropped.
+
 ### Custom pronunciations
 
 Proper nouns outside the shipped dictionaries reach the BART G2P fallback, which guesses from *English* spelling rules and mangles non-Anglo names. `addPronunciations` injects `word -> IPA` entries ahead of tier 1:

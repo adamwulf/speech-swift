@@ -352,6 +352,8 @@ public final class KokoroPhonemizer {
         case ";", "；": return ";"
         case ":": return ":"
         case "।": return "."
+        case "(", "（": return "("
+        case ")", "）": return ")"
         default: return nil
         }
     }
@@ -664,6 +666,9 @@ public final class KokoroPhonemizer {
         return words
     }
 
+    /// Punctuation passed to the model. Kokoro's vocabulary has tokens for
+    /// `(` and `)`, and the model sets a parenthetical aside off with them;
+    /// without them it reads the aside straight through.
     private func punctuationToPhoneme(_ text: String) -> String? {
         switch text {
         case ",": return ","
@@ -674,6 +679,8 @@ public final class KokoroPhonemizer {
         case ":": return ":"
         case "-": return "-"
         case "'": return "'"
+        case "(", "（": return "("
+        case ")", "）": return ")"
         default: return nil
         }
     }
