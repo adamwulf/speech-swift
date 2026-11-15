@@ -4,7 +4,8 @@ import Foundation
 public struct KokoroConfig: Codable, Sendable {
     /// Output audio sample rate in Hz.
     public let sampleRate: Int
-    /// Maximum phoneme input length (E2E model uses fixed 128).
+    /// Maximum phoneme input length. `fromPretrained` sets it to the loaded
+    /// E2E graph's `input_ids` slots: 128 for `kokoro_5s`.
     public let maxPhonemeLength: Int
     /// Style embedding dimension (ref_s input to CoreML model).
     public let styleDim: Int

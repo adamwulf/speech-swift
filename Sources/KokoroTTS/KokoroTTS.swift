@@ -11,8 +11,11 @@ import AudioCommon
 /// fine-tunes): load one with `fromPretrained(modelId: "aufklarer/Kokoro-82M-German-Martin-CoreML")`
 /// (or `…-Victoria-CoreML`) and synthesize with `language: "de"`.
 ///
-/// Uses an end-to-end CoreML model (`kokoro_5s.mlmodelc`) that runs the full
-/// pipeline (BERT → duration → alignment → prosody → decoder) in one call.
+/// Uses an end-to-end CoreML model (`kokoro_5s.mlmodelc` by default) that
+/// runs the full pipeline (BERT → duration → alignment → prosody → decoder)
+/// in one call. Other end-to-end bundles with the same inputs load through
+/// `fromPretrained(modelId:modelFile:)`; their input and output sizes are
+/// read from the model.
 ///
 /// ```swift
 /// let tts = try await KokoroTTSModel.fromPretrained()
@@ -26,6 +29,9 @@ public final class KokoroTTSModel {
     /// single `dm_martin` / `df_victoria` preset and `dict_de.json`.
     public static let germanMartinModelId = "aufklarer/Kokoro-82M-German-Martin-CoreML"
     public static let germanVictoriaModelId = "aufklarer/Kokoro-82M-German-Victoria-CoreML"
+    /// Default end-to-end bundle, `kokoro_5s.mlmodelc`: 128 phoneme slots,
+    /// a 5 s output window, and a `speed` input.
+    public static let defaultModelFile = "kokoro_5s"
     /// Default voice preset.
     public static let defaultVoice = "af_heart"
     /// Output sample rate.
@@ -34,30 +40,39 @@ public final class KokoroTTSModel {
     let config: KokoroConfig
     var network: KokoroNetwork?
     let phonemizer: KokoroPhonemizer
-    var voiceEmbeddings: [String: [Float]]
+    var voices: [String: KokoroVoice]
+    /// Chunk sizes for the loaded graph's input slots and output window.
+    let chunkBudget: KokoroChunkBudget
+    /// The token sent in place of BOS and EOS, or nil to keep the
+    /// phonemizer's 1 and 2. Upstream Kokoro uses 0 for both. With 0, the
+    /// start token gets a longer predicted lead-in and a short reply's onset
+    /// comes out cleaner. `fromPretrained` sets 0 for the masked exports
+    /// (`kokoro_masked_*`), where blind listening preferred it with
+    /// per-length voice rows, and leaves other graphs at 1 and 2.
+    public var boundaryTokenId: Int?
+    /// The boundary token `fromPretrained` uses for a model file: 0 for the
+    /// masked exports, nil (BOS 1, EOS 2) for every other graph.
+    public static func defaultBoundaryTokenId(forModelFile modelFile: String) -> Int? {
+        modelFile.hasPrefix("kokoro_masked") ? 0 : nil
+    }
+    /// Listening tests only: use a voice's averaged `embedding` even when
+    /// its file has per-length rows.
+    var experimentAveragedVoice = false
 
     var _isLoaded: Bool { network != nil }
 
-    init(config: KokoroConfig, network: KokoroNetwork, phonemizer: KokoroPhonemizer, voiceEmbeddings: [String: [Float]]) {
+    init(config: KokoroConfig, network: KokoroNetwork, phonemizer: KokoroPhonemizer, voices: [String: KokoroVoice]) {
         self.config = config
         self.network = network
         self.phonemizer = phonemizer
-        self.voiceEmbeddings = voiceEmbeddings
+        self.voices = voices
+        self.chunkBudget = .forGraph(
+            inputSlots: min(config.maxPhonemeLength, network.inputSlots),
+            outputSamples: network.outputSamples)
     }
 
     // MARK: - Synthesis
 
-    /// Input slots of the end-to-end graph (`input_ids` is `[1, 128]`).
-    static let inputSlots = 128
-    /// Token budget per chunk, as in speech-core's 5.0 s Kokoro profile. The
-    /// packed-LSTM models speak at upstream Kokoro's rate, about 10.5 phoneme
-    /// tokens per second, so a chunk this size stays inside the 5 s graph at
-    /// speed 1; the earlier 72 overflowed and split-and-retried.
-    static let chunkTokenBudget = 56
-    /// No chunk grows past this many tokens, the hard cap of the same
-    /// speech-core profile. A merged chunk near the 128-token input would
-    /// overrun the 5 s graph at this speech rate and render twice.
-    static let chunkTokenHardCap = 64
     /// A chunk shorter than this joins a neighbour when the budget allows it
     /// (the last chunk joins its predecessor up to the hard cap), and no cut
     /// between words makes one where the words allow it; very short
@@ -67,21 +82,22 @@ public final class KokoroTTSModel {
     static let minRetryTokens = 6
     /// How many times one chunk may be split again after an overflow.
     static let maxRetryDepth = 4
-    /// The last 200 ms of the bounded graph's output window are not trusted,
-    /// as in speech-core: speech reaching into them means the chunk was too
-    /// long and is split and rendered again.
-    static let outputTailGuardSamples = 4800
 
     /// Synthesize speech from text.
     ///
-    /// The text is split into chunks of up to 56 phoneme tokens, about what
-    /// the 5 s graph holds at the models' speech rate, preferring sentence
-    /// ends, then clauses, then evenly sized runs of words. Each chunk renders
-    /// in one call and the audio is concatenated, so short text is a single
-    /// call. Where a chunk ends inside a sentence, the silence at the seam is
-    /// cut to a word gap or a comma pause. A chunk whose speech would still
-    /// overrun the graph's output window is split again and rendered as two
-    /// pieces.
+    /// The text is split into chunks of what the loaded graph's output window
+    /// holds at the models' speech rate (56 phoneme tokens for the 5 s graph),
+    /// preferring sentence ends, then clauses, then evenly sized runs of
+    /// words. Each chunk renders in one call and the audio is concatenated,
+    /// so short text is a single call. Where a chunk ends inside a sentence,
+    /// the silence at the seam is cut to about a gap between words, or after
+    /// clause punctuation to less than Kokoro's own comma pause. A chunk
+    /// whose speech would still overrun the graph's output window is split
+    /// again and rendered as two pieces.
+    ///
+    /// `speed` needs a graph with a `speed` input, as `kokoro_5s` has; a
+    /// graph without one renders at speed 1 and logs that `speed` was
+    /// ignored.
     public func synthesize(
         text: String,
         voice: String = "af_heart",
@@ -109,12 +125,18 @@ public final class KokoroTTSModel {
             throw AudioModelError.inferenceFailed(
                 operation: "kokoro-synthesize", reason: "Model not loaded")
         }
-        guard let styleVector = voiceEmbeddings[voice] else {
-            let available = Array(voiceEmbeddings.keys).sorted().prefix(5)
+        guard let preset = voices[voice] else {
+            let available = Array(voices.keys).sorted().prefix(5)
             throw AudioModelError.voiceNotFound(
                 voice: voice,
                 searchPath: "Available: \(available.joined(separator: ", "))...")
         }
+        // A graph without a speed input speaks at speed 1; the seams follow
+        // the speed the audio actually has.
+        if !network.acceptsSpeed && speed != 1 {
+            AudioLog.inference.warning("Kokoro: this model has no speed input; rendering at speed 1 instead of \(speed)")
+        }
+        let speed = network.acceptsSpeed ? speed : 1
 
         // Packing measures many overlapping candidates and rendering needs the
         // ids of the pieces it kept; phonemize each piece of text once.
@@ -127,11 +149,31 @@ public final class KokoroTTSModel {
         }
         // Chunk up front, as speech-core does. Text within the budget is one
         // chunk and renders in one call; rendering longer text whole first
-        // would only overrun the 5 s window and cost a discarded pass.
-        let chunks = Self.chunkPlan(
-            text, countTokens: { tokenIds($0).count },
-            capacity: min(config.maxPhonemeLength, Self.inputSlots))
+        // would only overrun the output window and cost a discarded pass.
+        let chunks = Self.chunkPlan(text, countTokens: { tokenIds($0).count }, budget: chunkBudget)
 
+        try Self.emitPieces(
+            of: chunks, speed: speed, sampleRate: config.sampleRate,
+            render: { chunk in
+                try self.renderChunk(
+                    chunk, network: network, voice: preset, speed: speed,
+                    tokenIds: tokenIds, depth: 0)
+            },
+            onChunk: onChunk)
+    }
+
+    /// Renders `chunks` in order with `render` and hands each piece to
+    /// `onChunk`, trimming the silence at its seams and fading in every piece
+    /// after the first. `render` returns one chunk's pieces, several after an
+    /// overflow retry, each with its own text. Exactly one call, the last, has
+    /// `isFinal` set; no chunks yield one empty final piece.
+    static func emitPieces(
+        of chunks: [String],
+        speed: Float,
+        sampleRate: Int,
+        render: (String) throws -> [(text: String, audio: [Float])],
+        onChunk: ([Float], Bool) throws -> Void
+    ) throws {
         guard !chunks.isEmpty else {
             try onChunk([], true)
             return
@@ -140,40 +182,37 @@ public final class KokoroTTSModel {
         for (index, chunk) in chunks.enumerated() {
             // An overflow retry can turn one chunk into several pieces; they
             // come back together, so the final piece is known when emitted.
-            let pieces = try renderChunk(
-                chunk, network: network, style: styleVector, speed: speed,
-                tokenIds: tokenIds, depth: 0)
+            let pieces = try render(chunk)
             for (pieceIndex, piece) in pieces.enumerated() {
                 let isFinal = index == chunks.count - 1 && pieceIndex == pieces.count - 1
-                // A seam inside a sentence keeps only a word gap or a comma
-                // pause of silence. Both sides follow from the text before
-                // the seam, so a piece's tail is settled before it is emitted.
+                // A seam inside a sentence keeps about a gap between words, or
+                // after clause punctuation less than Kokoro's own comma pause.
+                // Both sides follow from the text before the seam, so a
+                // piece's tail is settled before it is emitted.
+                let keep = KokoroChunkSeams.keeps(
+                    previousText: previousText, text: piece.text, isFinal: isFinal,
+                    speed: speed, sampleRate: sampleRate)
                 var audio = KokoroChunkSeams.trim(
-                    piece.audio,
-                    keepLeading: previousText.flatMap {
-                        KokoroChunkSeams.keptSilence(after: $0, speed: speed, sampleRate: config.sampleRate)
-                    },
-                    keepTrailing: isFinal ? nil : KokoroChunkSeams.keptSilence(
-                        after: piece.text, speed: speed, sampleRate: config.sampleRate))
+                    piece.audio, keepLeading: keep.leading, keepTrailing: keep.trailing)
                 // A short fade-in keeps the seam between pieces click-free.
-                if previousText != nil { fadeIn(&audio) }
+                if previousText != nil { fadeIn(&audio, sampleRate: sampleRate) }
                 try onChunk(audio, isFinal)
                 previousText = piece.text
             }
         }
     }
 
-    /// The chunks `text` renders as: packed to `chunkTokenBudget`, with a
-    /// short chunk merged into a neighbour within the budget, or, for the
-    /// last chunk, within `chunkTokenHardCap`.
+    /// The chunks `text` renders as: packed to `budget.budget`, with a short
+    /// chunk merged into a neighbour within the budget, or, for the last
+    /// chunk, within `budget.hardCap`.
     static func chunkPlan(
         _ text: String,
         countTokens: (String) -> Int,
-        capacity: Int = inputSlots
+        budget: KokoroChunkBudget = .fiveSecond
     ) -> [String] {
         KokoroTextChunker.chunk(
-            text, countTokens: countTokens, maxTokens: chunkTokenBudget,
-            hardCapTokens: min(chunkTokenHardCap, capacity), minTailTokens: minTailTokens)
+            text, countTokens: countTokens, maxTokens: budget.budget,
+            hardCapTokens: budget.hardCap, minTailTokens: minTailTokens)
     }
 
     /// Renders one chunk, splitting it again while its speech would overrun
@@ -182,16 +221,16 @@ public final class KokoroTTSModel {
     private func renderChunk(
         _ text: String,
         network: KokoroNetwork,
-        style: [Float],
+        voice: KokoroVoice,
         speed: Float,
         tokenIds: (String) -> [Int],
         depth: Int
     ) throws -> [(text: String, audio: [Float])] {
         let ids = tokenIds(text)
-        let capacity = min(config.maxPhonemeLength, Self.inputSlots)
+        let capacity = min(config.maxPhonemeLength, network.inputSlots)
         var unsplit: [Float]?
         if ids.count <= capacity {
-            let pass = try runModel(tokenIds: ids, network: network, style: style, speed: speed)
+            let pass = try runModel(tokenIds: ids, network: network, voice: voice, speed: speed)
             if !pass.overran { return [(text, pass.audio)] }
             unsplit = pass.audio
         }
@@ -203,7 +242,7 @@ public final class KokoroTTSModel {
                 AudioLog.inference.info("Kokoro: splitting a \(ids.count)-token chunk that overran the output window")
                 return try pieces.flatMap {
                     try renderChunk(
-                        $0, network: network, style: style, speed: speed,
+                        $0, network: network, voice: voice, speed: speed,
                         tokenIds: tokenIds, depth: depth + 1)
                 }
             }
@@ -211,7 +250,7 @@ public final class KokoroTTSModel {
         // No safe split exists: keep what one bounded pass produces.
         if let unsplit { return [(text, unsplit)] }
         let clipped = Array(ids.prefix(capacity - 1)) + [phonemizer.eosId]
-        return [(text, try runModel(tokenIds: clipped, network: network, style: style, speed: speed).audio)]
+        return [(text, try runModel(tokenIds: clipped, network: network, voice: voice, speed: speed).audio)]
     }
 
     /// One pass of the end-to-end graph. `overran` is set when the predicted
@@ -219,25 +258,34 @@ public final class KokoroTTSModel {
     private func runModel(
         tokenIds: [Int],
         network: KokoroNetwork,
-        style styleVector: [Float],
+        voice: KokoroVoice,
         speed: Float
     ) throws -> (audio: [Float], overran: Bool) {
-        let padTo = Self.inputSlots
+        var tokenIds = tokenIds
+        if let boundary = boundaryTokenId, tokenIds.count >= 2 {
+            tokenIds[0] = boundary
+            tokenIds[tokenIds.count - 1] = boundary
+        }
+        let padTo = network.inputSlots
         let tokenCount = min(tokenIds.count, padTo)
         let paddedIds = phonemizer.pad(Array(tokenIds.prefix(padTo)), to: padTo)
 
         let inputIds = try createInt32Array(shape: [1, padTo], values: paddedIds.map { Int32($0) })
         let maskArray = try createInt32Array(shape: [1, padTo], values: (0..<padTo).map { Int32($0 < tokenCount ? 1 : 0) })
-        let refS = try createFloatArray(shape: [1, config.styleDim], values: styleVector)
-        let speedArray = try createFloatArray(shape: [1], values: [speed])
+        // BOS and EOS are not phonemes; the voice's per-length row, when it
+        // has them, is picked by the phonemes between them.
+        let style = experimentAveragedVoice ? voice.embedding : voice.style(phonemeCount: tokenCount - 2)
+        let refS = try createFloatArray(shape: [1, config.styleDim], values: style)
+        let speedArray = network.acceptsSpeed ? try createFloatArray(shape: [1], values: [speed]) : nil
 
         let t0 = CFAbsoluteTimeGetCurrent()
         let result = try network.predictE2E(inputIds: inputIds, attentionMask: maskArray, refS: refS, speed: speedArray)
         let elapsed = CFAbsoluteTimeGetCurrent() - t0
 
         let outputCapacity = result.audio.count
-        let overran = outputCapacity > Self.outputTailGuardSamples
-            && result.audioLengthSamples > outputCapacity - Self.outputTailGuardSamples
+        let tailGuard = KokoroChunkBudget.outputTailGuardSamples
+        let overran = outputCapacity > tailGuard
+            && result.audioLengthSamples > outputCapacity - tailGuard
         let validSamples = min(result.audioLengthSamples, outputCapacity)
         guard validSamples > 0 else { return ([], overran) }
 
@@ -249,6 +297,9 @@ public final class KokoroTTSModel {
             let ptr = result.audio.dataPointer.bindMemory(to: Float.self, capacity: validSamples)
             for i in 0..<validSamples { audio[i] = ptr[i] }
         }
+        // fp16 graphs can open with a faint noise burst before their lead-in
+        // silence, heard as a click at the start of every piece.
+        KokoroLeadInBurst.silence(&audio, sampleRate: config.sampleRate)
 
         // Kokoro's E2E model often emits 100–300 ms of trailing artifacts
         // past the real speech (random low-energy noise + an occasional
@@ -302,15 +353,15 @@ public final class KokoroTTSModel {
     }
 
     /// 5 ms linear fade-in at the start of a piece that follows another.
-    private func fadeIn(_ audio: inout [Float]) {
-        let count = min(audio.count, config.sampleRate / 200)
+    static func fadeIn(_ audio: inout [Float], sampleRate: Int) {
+        let count = min(audio.count, sampleRate / 200)
         guard count >= 2 else { return }
         for i in 0..<count { audio[i] *= Float(i) / Float(count) }
     }
 
     /// List available voice presets.
     public var availableVoices: [String] {
-        Array(voiceEmbeddings.keys).sorted()
+        Array(voices.keys).sorted()
     }
 
     /// Registers custom `word -> IPA` pronunciations for proper nouns missing from
@@ -355,14 +406,21 @@ public final class KokoroTTSModel {
     /// it. `fromPretrained` calls this before returning unless `warmUp` is
     /// false; a model loaded that way can be warmed up here later.
     public func warmUp() throws {
-        let voice = voiceEmbeddings[Self.defaultVoice] != nil ? Self.defaultVoice : (availableVoices.first ?? Self.defaultVoice)
-        _ = try? synthesize(text: "hello", voice: voice)
+        _ = try? synthesize(text: "hello", voice: defaultBundleVoice)
     }
 
     // MARK: - Model Loading
 
     /// Load a pretrained Kokoro model from HuggingFace.
     ///
+    /// - Parameter modelFile: The end-to-end bundle to download and load,
+    ///   without `.mlmodelc`. Defaults to `kokoro_5s`, the bundle every
+    ///   `aufklarer/Kokoro-82M-*` repo ships. A repo with other end-to-end
+    ///   bundles can name one here; its phoneme slots, output window and
+    ///   whether it takes a `speed` input are read from the model.
+    /// - Parameter voiceFilter: Shell patterns on voice ids (`a*`, `bf_emma`)
+    ///   that limit which `voices/<id>.json` files are downloaded and loaded.
+    ///   `nil`, the default, takes every voice in the repo.
     /// - Parameter computeUnits: Which hardware the main CoreML model runs on.
     ///   Defaults to `.all` (Neural Engine preferred). Pass `.cpuAndGPU` to bypass
     ///   the Neural Engine — useful as a fallback on platforms where the ANE
@@ -372,7 +430,9 @@ public final class KokoroTTSModel {
     ///   for example when the model is only being downloaded.
     public static func fromPretrained(
         modelId: String = defaultModelId,
+        modelFile: String = defaultModelFile,
         voice: String = defaultVoice,
+        voiceFilter: [String]? = nil,
         cacheDir: URL? = nil,
         offlineMode: Bool = false,
         computeUnits: MLComputeUnits = .all,
@@ -380,17 +440,19 @@ public final class KokoroTTSModel {
         warmUp: Bool = true,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> KokoroTTSModel {
-        AudioLog.modelLoading.info("Loading Kokoro model: \(modelId)")
+        AudioLog.modelLoading.info("Loading Kokoro model: \(modelId) (\(modelFile))")
 
         let cacheDir = try cacheDir ?? HuggingFaceDownloader.getCacheDirectory(for: modelId)
 
-        // Download E2E model + G2P + voice
+        // Download E2E model + G2P + voices. A listed file the repo does not
+        // have (dict_de.json outside the German bundles) matches nothing and
+        // is skipped.
         progressHandler?(0.0, "Downloading model...")
         try await HuggingFaceDownloader.downloadWeights(
             modelId: modelId,
             to: cacheDir,
             additionalFiles: [
-                "kokoro_5s.mlmodelc/**",
+                "\(modelFile).mlmodelc/**",
                 "G2PEncoder.mlmodelc/**",
                 "G2PDecoder.mlmodelc/**",
                 "vocab_index.json",
@@ -398,8 +460,7 @@ public final class KokoroTTSModel {
                 "us_gold.json",
                 "us_silver.json",
                 "dict_de.json",
-                "voices/*.json",
-            ],
+            ] + (voiceFilter ?? ["*"]).map { "voices/\($0).json" },
             offlineMode: offlineMode,
             downloadOptions: downloadOptions
         ) { fraction in
@@ -428,29 +489,31 @@ public final class KokoroTTSModel {
             AudioLog.modelLoading.debug("Loaded CoreML G2P encoder + decoder")
         }
 
-        // Load voice embeddings
+        // Load voice presets
         progressHandler?(0.78, "Loading voice embeddings...")
-        var voiceEmbeddings = [String: [Float]]()
+        var voices = [String: KokoroVoice]()
         let voicesDir = cacheDir.appendingPathComponent("voices")
         if FileManager.default.fileExists(atPath: voicesDir.path) {
             let files = try FileManager.default.contentsOfDirectory(at: voicesDir, includingPropertiesForKeys: nil)
             for file in files where file.pathExtension == "json" {
                 let voiceName = file.deletingPathExtension().lastPathComponent
-                if let embedding = try? loadVoiceEmbedding(from: file, styleDim: KokoroConfig.default.styleDim) {
-                    voiceEmbeddings[voiceName] = embedding
+                guard KokoroVoice.matches(voiceName, filter: voiceFilter) else { continue }
+                if let preset = try? KokoroVoice.load(from: file, styleDim: KokoroConfig.default.styleDim) {
+                    voices[voiceName] = preset
                 }
             }
-            AudioLog.modelLoading.debug("Loaded \(voiceEmbeddings.count) voice presets")
+            AudioLog.modelLoading.debug("Loaded \(voices.count) voice presets")
         }
 
         // Load E2E CoreML model
         progressHandler?(0.85, "Loading CoreML model...")
-        let network = try KokoroNetwork(directory: cacheDir, computeUnits: computeUnits)
-        AudioLog.modelLoading.debug("Loaded Kokoro E2E model")
+        let network = try KokoroNetwork(directory: cacheDir, modelFile: modelFile, computeUnits: computeUnits)
+        AudioLog.modelLoading.debug("Loaded Kokoro E2E model \(modelFile): \(network.inputSlots) phoneme slots, \(network.outputSamples) output samples, speed input: \(network.acceptsSpeed)")
 
         let model = KokoroTTSModel(
-            config: .default, network: network,
-            phonemizer: phonemizer, voiceEmbeddings: voiceEmbeddings)
+            config: KokoroConfig(maxPhonemeLength: network.inputSlots), network: network,
+            phonemizer: phonemizer, voices: voices)
+        model.boundaryTokenId = defaultBoundaryTokenId(forModelFile: modelFile)
 
         // The first prediction pays CoreML's one-time setup; take it here
         // rather than on the caller's first reply.
@@ -462,13 +525,5 @@ public final class KokoroTTSModel {
         progressHandler?(1.0, "Model loaded")
         AudioLog.modelLoading.info("Kokoro model loaded successfully")
         return model
-    }
-
-    /// Load voice embedding from JSON file.
-    private static func loadVoiceEmbedding(from url: URL, styleDim: Int) throws -> [Float] {
-        let data = try Data(contentsOf: url)
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let embedding = json["embedding"] as? [Double] else { return [] }
-        return embedding.prefix(styleDim).map { Float($0) }
     }
 }

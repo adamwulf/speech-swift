@@ -7,9 +7,10 @@ import Foundation
 /// synthesizer zeroes leave about 500 ms more at the end, so a cut in the
 /// middle of a sentence would pause for most of a second. Where the text
 /// before a seam does not end a sentence, the silence on both sides is cut
-/// down to what Kokoro leaves inside one chunk: a word gap after a cut
-/// between words, a comma pause after `,` `;` `:`. Sentence ends keep the
-/// model's own pause.
+/// down to no more than Kokoro leaves inside one chunk: about a gap between
+/// words after a cut between words, and less than its own comma pause after
+/// `,` `;` `:`. Sentence ends keep the model's own pause. The utterance's
+/// own lead-in, before the first piece, is cut to about 100 ms.
 enum KokoroChunkSeams {
 
     /// What ends the text before a seam.
@@ -24,8 +25,15 @@ enum KokoroChunkSeams {
     /// rest about 15-45 ms.
     static let wordGapSeconds = 0.020
     /// Silence kept at a cut after `,` `;` `:` at speed 1, both sides
-    /// together. Inside one chunk Kokoro pauses about 210-275 ms at a comma.
+    /// together. It is kept shorter than Kokoro's own comma pause inside one
+    /// chunk, measured at 210-275 ms at speed 1 (165-210 ms at speed 1.2).
     static let clauseGapSeconds = 0.160
+    /// Lead-in silence kept before the first piece's speech at speed 1, on
+    /// every graph. With boundary token 0 the masked exports' lead-in grows
+    /// to about 450 ms before a short reply; soniqo's `kokoro_5s` opens with
+    /// about 250 ms; the masked exports with BOS 1 with about 75-125 ms,
+    /// which is left alone. Cutting keeps the model's onset without the wait.
+    static let leadInSeconds = 0.100
     /// A 10 ms window below this RMS is silence. The graph's lead-in sits
     /// under 0.001; soft onsets and endings (h, f, s, th) rise above this
     /// within a window or two, and the kept silence covers the rest.
@@ -65,6 +73,31 @@ enum KokoroChunkSeams {
         }
         let rate = Double(max(speed, 0.1))
         return Int((gap / 2 / rate * Double(sampleRate)).rounded())
+    }
+
+    /// Samples of silence one rendered piece keeps at each end. `leading`
+    /// follows from the text of the piece before it; for the first piece,
+    /// whose lead-in starts the utterance, it is `leadInSeconds`. `trailing`
+    /// follows from the piece's own text and is nil for the final piece,
+    /// whose tail ends it. Either is nil after a sentence end. Pieces of an
+    /// overflow retry are handled like any other piece, by their own text.
+    /// Nil leaves that end as rendered. Faster speech keeps proportionally
+    /// less.
+    static func keeps(
+        previousText: String?,
+        text: String,
+        isFinal: Bool,
+        speed: Float,
+        sampleRate: Int
+    ) -> (leading: Int?, trailing: Int?) {
+        let leading: Int?
+        if let previousText {
+            leading = keptSilence(after: previousText, speed: speed, sampleRate: sampleRate)
+        } else {
+            leading = Int((leadInSeconds / Double(max(speed, 0.1)) * Double(sampleRate)).rounded())
+        }
+        let trailing = isFinal ? nil : keptSilence(after: text, speed: speed, sampleRate: sampleRate)
+        return (leading, trailing)
     }
 
     /// Cuts the silence before the first and after the last window at or
