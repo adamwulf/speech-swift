@@ -105,6 +105,7 @@ final class E2EKokoroListeningSetTests: XCTestCase {
             Config(name: "X3_eliza-5s-fp16", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuAndNeuralEngine, cacheDir: dir),
             Config(name: "X3c_eliza-5s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuOnly, cacheDir: dir),
             Config(name: "X4_eliza-5s-fp16_pad0", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuAndNeuralEngine, boundary: 0, cacheDir: dir),
+            Config(name: "X4c_eliza-5s-fp16_cpu_pad0", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuOnly, boundary: 0, cacheDir: dir),
             Config(name: "H1_fluid-5s_ane", modelId: fluid, modelFile: "kokoro_21_5s", units: .cpuAndNeuralEngine),
             Config(name: "B_fluid-15s_ane", modelId: fluid, modelFile: "kokoro_21_15s", units: .cpuAndNeuralEngine),
             Config(name: "L10h_eliza-10s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_10s_fp16", units: .cpuOnly, cacheDir: dir),

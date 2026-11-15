@@ -215,6 +215,17 @@ The existing `make_blind_set.py` was run separately for the default eight labels
 - **Paragraph:** the split render was preferred "even though it has more pauses".
 - **Long sentences:** our one-pass 15 s render was preferred every time. That fits the split SDK's 128-token ceiling, which cuts these sentences into two or three chunks with pauses between them.
 
+### Per-length voice rows and BOS/EOS
+
+The aufklarer `af_heart` embedding this package loads is exactly the mean of hexgrad's 510 per-length rows (max difference 0.000000). For long utterances the matching row is close to that mean, at cosine 0.999 for 120 phonemes. For short ones it is not: 0.94 at 60 phonemes, 0.74 at 20, 0.49 at 5. A voice file with all 510 rows was built from hexgrad's `af_heart.pt`, keeping the mean as `embedding`; `KokoroVoice` already selects `rows[phonemes - 1]` when a file has them. The test then re-rendered the eight A/B texts with our 5 s fp16 export.
+
+- **Rows make short replies faster.** On the 15 s graph (one pass, no chunking): hello 2.52 s to 1.95 s, short 1.93 s to 1.62 s, question 4.00 s to 3.55 s; long texts are unchanged. Chunking is unchanged.
+- **Blind, our 5 s fp16 with rows vs stock split `M_default`:** split preferred 3 (yes, question "barely", paragraph "close"), ours 2 (long, numbers), 3 ties (short, hello, commas). Without rows the split pipeline had won 5 of 8.
+- **"Yes." with BOS/EOS 1/2 sounded like "ess".** The predicted durations are normal (`j` 50-75 ms), but the "y" starts from near silence. BOS/EOS 0, the split SDK's convention, lengthens the start token from 3-5 frames to 17-19, giving about 450 ms of lead-in. With rows and BOS/EOS 0, single-chunk renders match the split pipeline's lengths exactly: yes 1.35 s, short 1.80 s, hello 2.17 s.
+- **Blind, rows with BOS/EOS 0 vs rows with 1/2 (both ours):** 0 preferred 3 (yes "still better", numbers, question "slightly"), 1/2 preferred 1 (paragraph, "barely"), 4 ties.
+
+So most of the split pipeline's short-text advantage comes from the voice's per-length rows and the BOS/EOS convention, not the split export. The cost of BOS/EOS 0 is about 400 ms more silence before a short reply's speech. Trimming the first piece's lead-in would remove it.
+
 The short-text preference is not attributable to the split export alone. The two sides also differ in front end (Misaki vs this package's phonemizer), BOS/EOS (0 vs 1/2) and voice selection. The split SDK picks the voice's per-length style row. This package's aufklarer voice files hold only the mean embedding, so every chunk uses the same style. Per-length rows are the cheapest of these to test: `KokoroVoice` already uses rows when a voice file has them, and hexgrad's voice tensors hold all 510.
 
 ## Recommendation
