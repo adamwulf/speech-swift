@@ -80,9 +80,15 @@ with torch.no_grad():
                 mask = torch.zeros(1, steps, dtype=torch.int32)
                 mask[0, :length] = 1
                 got = native(x, mask)
-                worst["packed"] = max(worst["packed"], float((got - packed(lstm, x, length)).abs().max()))
-                worst["unrolled"] = max(worst["unrolled"], float((got - unrolled(lstm, x, mask)).abs().max()))
-                worst["pad"] = max(worst["pad"], float(got[:, length:].abs().max()) if length < steps else 0.0)
+                errors = {
+                    "packed": (got - packed(lstm, x, length)).abs().max(),
+                    "unrolled": (got - unrolled(lstm, x, mask)).abs().max(),
+                    "pad": got[:, length:].abs().max() if length < steps else got.new_zeros(()),
+                }
+                for key, err in errors.items():
+                    # max() would keep the previous value over a NaN; count it as a failure
+                    err = float(err) if torch.isfinite(err) else float("inf")
+                    worst[key] = max(worst[key], err)
                 cases += 1
         print(f"{name}: input {lstm.input_size}, hidden {lstm.hidden_size}, ok so far: {worst}")
 

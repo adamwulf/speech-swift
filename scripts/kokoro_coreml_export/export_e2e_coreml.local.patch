@@ -63,7 +63,7 @@
      x_norm = (x - mean) / torch.sqrt(var + self.eps)
      h = self.fc(s).view(B, 2 * self.num_features, 1)
      gamma, beta = torch.chunk(h, chunks=2, dim=1)
-@@ -143,44 +173,45 @@
+@@ -143,44 +173,46 @@
  
  # ---- CoreML-friendly encoders (from export_duration.py, proven) ----
  class MaskedBidirectionalLSTM(nn.Module):
@@ -73,7 +73,8 @@
 +
 +    [local change, not in eliza] eliza's version unrolls both directions step
 +    by step in Python, so every LSTM converts to thousands of Core ML ops
-+    (38,000-55,000 in the whole graph) and Core ML's first load takes minutes.
++    (about 50,000 in the whole 5 s graph, 105,000 in the 15 s one), and Core
++    ML's first load takes 10-54 s on a Mac and minutes on an iPhone.
 +    This one uses two native unidirectional LSTMs, each a single Core ML
 +    `lstm` op:
 +    - forward: the padding comes after the valid steps, so a plain run over
@@ -141,7 +142,7 @@
  
  class CMLTextEncoder(nn.Module):
      def __init__(self, enc):
-@@ -377,13 +408,81 @@
+@@ -377,13 +409,81 @@
      return ids, mask, ref_s, phases, speed
  
  
@@ -224,7 +225,7 @@
      ap.add_argument("--out", default=os.environ.get("KOKORO_COREML_OUT", "/tmp/kokoro-coreml-work/out"))
      args = ap.parse_args()
      bucket_frames = args.frames if args.frames > 0 else args.seconds * SR // SAMPLES_PER_FRAME
-@@ -460,6 +559,8 @@
+@@ -460,6 +560,8 @@
      with torch.no_grad():
          traced = torch.jit.trace(e2e, (ids, mask, ref_s, phases, speed), strict=False, check_trace=False)
      T = args.tokens
@@ -233,7 +234,7 @@
      print("[convert] ct.convert...")
      mlmodel = ct.convert(
          traced,
-@@ -477,14 +578,24 @@
+@@ -477,14 +579,24 @@
          ],
          convert_to="mlprogram",
          minimum_deployment_target=ct.target.iOS18,

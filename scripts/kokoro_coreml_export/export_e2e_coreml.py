@@ -184,7 +184,8 @@ class MaskedBidirectionalLSTM(nn.Module):
 
     [local change, not in eliza] eliza's version unrolls both directions step
     by step in Python, so every LSTM converts to thousands of Core ML ops
-    (38,000-55,000 in the whole graph) and Core ML's first load takes minutes.
+    (about 50,000 in the whole 5 s graph, 105,000 in the 15 s one), and Core
+    ML's first load takes 10-54 s on a Mac and minutes on an iPhone.
     This one uses two native unidirectional LSTMs, each a single Core ML
     `lstm` op:
     - forward: the padding comes after the valid steps, so a plain run over

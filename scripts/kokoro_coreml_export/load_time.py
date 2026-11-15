@@ -1,6 +1,6 @@
 """Op count and Core ML load time of a compiled graph.
 
-Usage: python load_time.py <model.mlmodelc> [units=cpu|ane|all]
+Usage: python load_time.py <model.mlmodelc> [cpu|ane|all]   (default cpu)
 
 Counts the ops in the compiled program (model.mil), all and without `const`,
 plus the most common op types. Then copies the graph to a new temporary
