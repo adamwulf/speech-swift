@@ -18,7 +18,11 @@ Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSMo
 | `diag_sinegen.py` | Inside the harmonic source: rad, resampled and cumulative phase, sin, sine waves, voiced mask |
 | `check_nearest.py` | Confirms the constant-index nearest resample equals `F.interpolate(mode="nearest")` |
 | `make_blind_set.py` | Shuffles A/B WAV pairs under neutral names, with a separate key |
-| `noise_floor.py` | Lead-in and quietest-window RMS of rendered WAVs, in dBFS |
+| `unblind.py` | Joins a blind key with the listener's tally and counts wins per comparison |
+| `noise_floor.py` | Lead-in RMS, quietest audible 10 ms windows (digital silence excluded) and share of digital silence, in dBFS |
+| `seam_bursts.py` | Short bursts of sound between runs of digital silence: the fp16 start-of-pass burst check |
+| `first_frame.py` | First 25 ms (and 25-30 ms) RMS per configuration: should be silence on every graph |
+| `huggingface/` | Canonical model card and publishing steps for `milestonemade/Kokoro-82M-CoreML-Masked` (see `huggingface/PUBLISHING.md`) |
 
 ## The local changes
 
@@ -57,4 +61,39 @@ python parity_coreml.py export_e2e_coreml.py out/fp16dec-15s/kokoro_15s.mlpackag
 
 On the CPU, the 5 s and 10 s fp16 graphs open each pass with a faint noise burst (12-27 ms); `KokoroTTSModel` silences it (`KokoroLeadInBurst`, see [kokoro-tts.md](../../docs/models/kokoro-tts.md#long-text)).
 
-The compiled `.mlmodelc` loads next to the aufklarer vocabulary, G2P and voice files, with `fromPretrained(modelFile:cacheDir:offlineMode: true)`. `E2EKokoroListeningSetTests` renders an A/B listening set from such a folder (set `KOKORO_LISTENING_DIR` and `KOKORO_AB_BUNDLE_DIR`).
+The compiled `.mlmodelc` loads next to the aufklarer vocabulary, G2P and voice files, with `fromPretrained(modelFile:cacheDir:offlineMode: true)`.
+
+## Regenerating the listening sets
+
+`E2EKokoroListeningSetTests` renders every listening set used in the research notes. It writes `<config>_<text>.wav` (24 kHz, 16-bit) and prints, per configuration and text, the pieces, audio length, render time and pitch stability. It skips unless `KOKORO_LISTENING_DIR` is set.
+
+The bundle folder (`KOKORO_AB_BUNDLE_DIR`) holds the compiled graphs under the names the configurations use: `kokoro_5s.mlmodelc` (soniqo) and `kokoro_eliza_{5,10,15}s_{fp32,fp16}.mlmodelc` (these exports). Next to them go the aufklarer `vocab_index.json`, `g2p_vocab.json`, `us_gold.json`, `us_silver.json`, `G2PEncoder.mlmodelc`, `G2PDecoder.mlmodelc` and `voices/`. A configuration whose graph is missing is skipped. The FluidAudio configurations download `FluidInference/kokoro-82m-coreml` instead.
+
+| Set | Environment | Texts | Configurations |
+|---|---|---|---|
+| Warble | `KOKORO_LISTENING_DIR` only | short, long | soniqo `kokoro_5s` vs FluidAudio 5 s / 15 s, with zero phases, CPU only, BOS/EOS 0, averaged voice |
+| A/B | + `KOKORO_AB_BUNDLE_DIR` | 8 texts, "Yes." to three sentences | soniqo, these exports (fp32/fp16, CPU/Neural Engine, BOS/EOS 0), FluidAudio 5 s / 15 s, 10 s / 15 s fp16 |
+| Long | + `KOKORO_LISTENING_SET=long` | 6 single sentences of 120-200 tokens | soniqo and fp16 5 s, fp32/fp16 10 s and 15 s |
+| Parentheses | + `KOKORO_LISTENING_SET=parens` | 4 asides, each also with a comma before the `(` | as Long |
+
+`KOKORO_LISTENING_CONFIGS` (comma-separated configuration names, such as `L15h_eliza-15s-fp16_cpu`) limits a run to those configurations. Example, run from the repository root:
+
+```bash
+KOKORO_LISTENING_DIR=/tmp/listen-long KOKORO_AB_BUNDLE_DIR=/tmp/kokoro-bundle KOKORO_LISTENING_SET=long \
+KOKORO_LISTENING_CONFIGS=X3c_eliza-5s-fp16_cpu,L15h_eliza-15s-fp16_cpu \
+    swift test --filter E2EKokoroListeningSetTests --disable-sandbox
+```
+
+Each pass draws new random phases, so renders differ slightly from run to run; durations and seams do not.
+
+The blind loop:
+
+```bash
+python make_blind_set.py /tmp/listen-long /tmp/listen-long/blind /tmp/blind-key-long.csv \
+    texts=build,basement,airport,next-step,saturday,dentist \
+    c15:X3c_eliza-5s-fp16_cpu:L15h_eliza-15s-fp16_cpu
+# listen to blind/<text>_c15_1.wav and _2.wav; record pair,preferred,strength rows in a tally CSV
+python unblind.py /tmp/blind-key-long.csv /tmp/tally-long.csv
+```
+
+Checks after rendering: `seam_bursts.py` and `first_frame.py` for the start-of-pass burst, and `noise_floor.py` for floors. `E2EKokoroComputePlanTests` (`KOKORO_PLAN_DIR`, `KOKORO_PLAN_FILES`) reports where Core ML places each op of a compiled graph.
