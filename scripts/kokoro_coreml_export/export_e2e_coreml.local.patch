@@ -63,12 +63,88 @@
      x_norm = (x - mean) / torch.sqrt(var + self.eps)
      h = self.fc(s).view(B, 2 * self.num_features, 1)
      gamma, beta = torch.chunk(h, chunks=2, dim=1)
-@@ -375,15 +405,83 @@
-     phases = torch.rand(1, 9, generator=g, dtype=torch.float32)
-     speed = torch.tensor([1.0], dtype=torch.float32)
+@@ -143,44 +173,45 @@
+ 
+ # ---- CoreML-friendly encoders (from export_duration.py, proven) ----
+ class MaskedBidirectionalLSTM(nn.Module):
++    """Bidirectional LSTM over right-padded input (valid steps first, then
++    padding), equal to PyTorch's packed sequences at the valid steps and zero
++    at the padded ones.
++
++    [local change, not in eliza] eliza's version unrolls both directions step
++    by step in Python, so every LSTM converts to thousands of Core ML ops
++    (38,000-55,000 in the whole graph) and Core ML's first load takes minutes.
++    This one uses two native unidirectional LSTMs, each a single Core ML
++    `lstm` op:
++    - forward: the padding comes after the valid steps, so a plain run over
++      the whole sequence already gives the packed output at the valid steps;
++    - backward: each sequence's valid steps are reversed in place (step t
++      reads step len-1-t; padded steps stay put), run through the forward
++      direction's op with the reverse weights, and put back in order with
++      the same indices, which are their own inverse.
++    Only the per-step outputs are used, never the final state."""
++
+     def __init__(self, lstm: nn.LSTM):
+         super().__init__()
+         assert lstm.num_layers == 1 and lstm.bidirectional and lstm.batch_first
+         self.hidden_size = lstm.hidden_size
+-        for nm in ["weight_ih_l0","weight_hh_l0","bias_ih_l0","bias_hh_l0",
+-                   "weight_ih_l0_reverse","weight_hh_l0_reverse","bias_ih_l0_reverse","bias_hh_l0_reverse"]:
+-            self.register_buffer(nm, getattr(lstm, nm).detach().clone())
+-    def _cell(self, x_t, h, c, wih, whh, bih, bhh):
+-        g = F.linear(x_t, wih, bih) + F.linear(h, whh, bhh)
+-        i, f, gg, o = g.chunk(4, dim=1)
+-        i = torch.sigmoid(i)
+-        f = torch.sigmoid(f)
+-        gg = torch.tanh(gg)
+-        o = torch.sigmoid(o)
+-        c_new = f * c + i * gg
+-        return o * torch.tanh(c_new), c_new
++        self.fwd = nn.LSTM(lstm.input_size, lstm.hidden_size, batch_first=True)
++        self.bwd = nn.LSTM(lstm.input_size, lstm.hidden_size, batch_first=True)
++        with torch.no_grad():
++            for nm in ("weight_ih_l0", "weight_hh_l0", "bias_ih_l0", "bias_hh_l0"):
++                getattr(self.fwd, nm).copy_(getattr(lstm, nm))
++                getattr(self.bwd, nm).copy_(getattr(lstm, nm + "_reverse"))
++
+     def forward(self, x, attention_mask):
+         b, steps, _ = x.shape
+-        m = attention_mask.to(dtype=x.dtype)
+-        hf = x.new_zeros((b, self.hidden_size))
+-        cf = x.new_zeros((b, self.hidden_size))
+-        fout = []
+-        for t in range(steps):
+-            a = m[:, t].unsqueeze(1)
+-            h_new, c_new = self._cell(x[:, t, :], hf, cf, self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0)
+-            hf = h_new * a + hf * (1 - a)
+-            cf = c_new * a + cf * (1 - a)
+-            fout.append(hf * a)
+-        hb = x.new_zeros((b, self.hidden_size))
+-        cb = x.new_zeros((b, self.hidden_size))
+-        brev = []
+-        for t in range(steps - 1, -1, -1):
+-            a = m[:, t].unsqueeze(1)
+-            h_new, c_new = self._cell(x[:, t, :], hb, cb, self.weight_ih_l0_reverse, self.weight_hh_l0_reverse, self.bias_ih_l0_reverse, self.bias_hh_l0_reverse)
+-            hb = h_new * a + hb * (1 - a)
+-            cb = c_new * a + cb * (1 - a)
+-            brev.append(hb * a)
+-        return torch.cat([torch.stack(fout, 1), torch.stack(list(reversed(brev)), 1)], dim=2)
++        m = attention_mask.to(dtype=x.dtype).unsqueeze(-1)  # [B,T,1]
++        hf, _ = self.fwd(x)
++        lengths = attention_mask.to(torch.long).sum(dim=1, keepdim=True)  # [B,1]
++        t = torch.arange(steps, dtype=torch.long).view(1, steps)
++        rev = torch.where(t < lengths, lengths - 1 - t, t)  # [B,T]
++        xr = torch.gather(x, 1, rev.unsqueeze(-1).expand(b, steps, x.shape[2]))
++        hr, _ = self.bwd(xr)
++        hb = torch.gather(hr, 1, rev.unsqueeze(-1).expand(b, steps, self.hidden_size))
++        return torch.cat([hf * m, hb * m], dim=2)
+ 
+ class CMLTextEncoder(nn.Module):
+     def __init__(self, enc):
+@@ -377,13 +408,81 @@
      return ids, mask, ref_s, phases, speed
-+
-+
+ 
+ 
 +NUM_HARMONICS = 9  # SineGen harmonic_num + 1: the phase path's distinctive axis
 +FP32_KEPT = []
 +
@@ -91,8 +167,8 @@
 +# the STFT bins of the vocoder's source analysis and iSTFT (n_fft 20), added
 +# with KOKORO_FP32_AXES=9,11.
 +FP32_AXES = {int(a) for a in os.environ.get("KOKORO_FP32_AXES", str(NUM_HARMONICS)).split(",") if a}
- 
- 
++
++
 +DEC_STATE = {"frames": 0, "in_decoder": False}
 +
 +
@@ -148,7 +224,7 @@
      ap.add_argument("--out", default=os.environ.get("KOKORO_COREML_OUT", "/tmp/kokoro-coreml-work/out"))
      args = ap.parse_args()
      bucket_frames = args.frames if args.frames > 0 else args.seconds * SR // SAMPLES_PER_FRAME
-@@ -460,6 +558,8 @@
+@@ -460,6 +559,8 @@
      with torch.no_grad():
          traced = torch.jit.trace(e2e, (ids, mask, ref_s, phases, speed), strict=False, check_trace=False)
      T = args.tokens
@@ -157,7 +233,7 @@
      print("[convert] ct.convert...")
      mlmodel = ct.convert(
          traced,
-@@ -477,14 +577,24 @@
+@@ -477,14 +578,24 @@
          ],
          convert_to="mlprogram",
          minimum_deployment_target=ct.target.iOS18,
