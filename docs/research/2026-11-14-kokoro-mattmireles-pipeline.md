@@ -2,7 +2,7 @@
 
 2026-11-14. Evaluation only; no changes to `Sources/` or the package manifest.
 
-**A split export is worth prototyping.** The tested pipeline genuinely places its large stages on the Neural Engine, also runs on the GPU without the fused graphs' MPSGraph abort, and delivers much lower warm latency. **Sound-quality parity remains unproven:** the blind sets are ready, but several short replies have materially shorter speech spans. Keep the published models as the quality reference until Adam has rated the pairs and a matched-input comparison has isolated that difference.
+**A split export is worth prototyping.** The tested pipeline genuinely places its large stages on the Neural Engine, also runs on the GPU without the fused graphs' MPSGraph abort, and delivers much lower warm latency. **Sound-quality parity remains unproven:** the blind sets are ready, but several short replies have materially shorter speech spans. Keep the published models as the quality reference until the blind pairs have been rated and a matched-input comparison has isolated that difference.
 
 ## Scope and provenance
 
@@ -204,7 +204,7 @@ All 14 stock candidates, six selected `.all` long candidates, diagnostic alterna
 
 The existing `make_blind_set.py` was run separately for the default eight labels and for `texts=build,basement,airport,next-step,saturday,dentist`. References were copied from exactly `listen-ab-burstfix3/` and `listen-long-burstfix2/`; they were not regenerated. The text labels and sentences came from the existing listening fixture.[^12]
 
-**Listening status: pending Adam's ratings.** Numerical sanity and placement are established; an equal-or-better sound-quality claim is not.
+**Listening status: blind ratings pending.** Numerical sanity and placement are established; an equal-or-better sound-quality claim is not.
 
 ## Recommendation
 
@@ -216,7 +216,7 @@ Build a split-export prototype while retaining our published models as the refer
 
 Preserve our phonemizer, boundary convention, voice selection and long-window chunk policy in that prototype so quality comparisons isolate the export. The current upstream SDK's 128-token limit and pause behavior are not reasons to discard our long-window quality gains.
 
-Adoption should require matched-input duration/parity tests and Adam's blind preferences. This experiment clears the **hardware placement, compilation and speed** questions. It leaves the **short-speech rate and perceptual quality** questions open.
+Adoption should require matched-input duration/parity tests and blind listening preferences. This experiment clears the **hardware placement, compilation and speed** questions. It leaves the **short-speech rate and perceptual quality** questions open.
 
 ## Reproduction evidence
 
