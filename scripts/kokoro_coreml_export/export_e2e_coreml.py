@@ -178,44 +178,46 @@ AdaIN1d.forward = _adain_forward_masked
 
 # ---- CoreML-friendly encoders (from export_duration.py, proven) ----
 class MaskedBidirectionalLSTM(nn.Module):
+    """Bidirectional LSTM over right-padded input (valid steps first, then
+    padding), equal to PyTorch's packed sequences at the valid steps and zero
+    at the padded ones.
+
+    [local change, not in eliza] eliza's version unrolls both directions step
+    by step in Python, so every LSTM converts to thousands of Core ML ops
+    (about 50,000 in the whole 5 s graph, 105,000 in the 15 s one), and Core
+    ML's first load takes 10-54 s on a Mac and minutes on an iPhone.
+    This one uses two native unidirectional LSTMs, each a single Core ML
+    `lstm` op:
+    - forward: the padding comes after the valid steps, so a plain run over
+      the whole sequence already gives the packed output at the valid steps;
+    - backward: each sequence's valid steps are reversed in place (step t
+      reads step len-1-t; padded steps stay put), run through the forward
+      direction's op with the reverse weights, and put back in order with
+      the same indices, which are their own inverse.
+    Only the per-step outputs are used, never the final state."""
+
     def __init__(self, lstm: nn.LSTM):
         super().__init__()
         assert lstm.num_layers == 1 and lstm.bidirectional and lstm.batch_first
         self.hidden_size = lstm.hidden_size
-        for nm in ["weight_ih_l0","weight_hh_l0","bias_ih_l0","bias_hh_l0",
-                   "weight_ih_l0_reverse","weight_hh_l0_reverse","bias_ih_l0_reverse","bias_hh_l0_reverse"]:
-            self.register_buffer(nm, getattr(lstm, nm).detach().clone())
-    def _cell(self, x_t, h, c, wih, whh, bih, bhh):
-        g = F.linear(x_t, wih, bih) + F.linear(h, whh, bhh)
-        i, f, gg, o = g.chunk(4, dim=1)
-        i = torch.sigmoid(i)
-        f = torch.sigmoid(f)
-        gg = torch.tanh(gg)
-        o = torch.sigmoid(o)
-        c_new = f * c + i * gg
-        return o * torch.tanh(c_new), c_new
+        self.fwd = nn.LSTM(lstm.input_size, lstm.hidden_size, batch_first=True)
+        self.bwd = nn.LSTM(lstm.input_size, lstm.hidden_size, batch_first=True)
+        with torch.no_grad():
+            for nm in ("weight_ih_l0", "weight_hh_l0", "bias_ih_l0", "bias_hh_l0"):
+                getattr(self.fwd, nm).copy_(getattr(lstm, nm))
+                getattr(self.bwd, nm).copy_(getattr(lstm, nm + "_reverse"))
+
     def forward(self, x, attention_mask):
         b, steps, _ = x.shape
-        m = attention_mask.to(dtype=x.dtype)
-        hf = x.new_zeros((b, self.hidden_size))
-        cf = x.new_zeros((b, self.hidden_size))
-        fout = []
-        for t in range(steps):
-            a = m[:, t].unsqueeze(1)
-            h_new, c_new = self._cell(x[:, t, :], hf, cf, self.weight_ih_l0, self.weight_hh_l0, self.bias_ih_l0, self.bias_hh_l0)
-            hf = h_new * a + hf * (1 - a)
-            cf = c_new * a + cf * (1 - a)
-            fout.append(hf * a)
-        hb = x.new_zeros((b, self.hidden_size))
-        cb = x.new_zeros((b, self.hidden_size))
-        brev = []
-        for t in range(steps - 1, -1, -1):
-            a = m[:, t].unsqueeze(1)
-            h_new, c_new = self._cell(x[:, t, :], hb, cb, self.weight_ih_l0_reverse, self.weight_hh_l0_reverse, self.bias_ih_l0_reverse, self.bias_hh_l0_reverse)
-            hb = h_new * a + hb * (1 - a)
-            cb = c_new * a + cb * (1 - a)
-            brev.append(hb * a)
-        return torch.cat([torch.stack(fout, 1), torch.stack(list(reversed(brev)), 1)], dim=2)
+        m = attention_mask.to(dtype=x.dtype).unsqueeze(-1)  # [B,T,1]
+        hf, _ = self.fwd(x)
+        lengths = attention_mask.to(torch.long).sum(dim=1, keepdim=True)  # [B,1]
+        t = torch.arange(steps, dtype=torch.long).view(1, steps)
+        rev = torch.where(t < lengths, lengths - 1 - t, t)  # [B,T]
+        xr = torch.gather(x, 1, rev.unsqueeze(-1).expand(b, steps, x.shape[2]))
+        hr, _ = self.bwd(xr)
+        hb = torch.gather(hr, 1, rev.unsqueeze(-1).expand(b, steps, self.hidden_size))
+        return torch.cat([hf * m, hb * m], dim=2)
 
 class CMLTextEncoder(nn.Module):
     def __init__(self, enc):

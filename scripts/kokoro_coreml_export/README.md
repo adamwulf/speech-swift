@@ -1,6 +1,6 @@
 # Kokoro end-to-end CoreML export (masked LSTMs)
 
-Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSModel` loads through `fromPretrained(modelFile:)`. Its bidirectional LSTMs hold their state on padded steps, so predicted durations match upstream Kokoro. The step-by-step plan is [docs/plans/kokoro-e2e-5s-export-ab.md](../../docs/plans/kokoro-e2e-5s-export-ab.md), and the findings are in [docs/research/2026-11-13-kokoro-long-window-and-exporters.md](../../docs/research/2026-11-13-kokoro-long-window-and-exporters.md).
+Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSModel` loads through `fromPretrained(modelFile:)`. Its bidirectional LSTMs ignore the padding, matching PyTorch's packed sequences, so predicted durations match upstream Kokoro. The step-by-step plan is [docs/plans/kokoro-e2e-5s-export-ab.md](../../docs/plans/kokoro-e2e-5s-export-ab.md), and the findings are in [docs/research/2026-11-13-kokoro-long-window-and-exporters.md](../../docs/research/2026-11-13-kokoro-long-window-and-exporters.md).
 
 `export_e2e_coreml.py` is elizaOS/eliza's `packages/training/scripts/kokoro/coreml/export_e2e_coreml.py` (MIT, Copyright (c) 2026 Shaw Walters and elizaOS Contributors; see `LICENSE-elizaOS-eliza`) at commit `b2e30700d0b9a63e5e478505b6ddd28cd4fa8bc3`, with our changes applied. It runs against mattmireles/kokoro-coreml (Apache-2.0) at `2a75c780664b2ea0430eef6829c04f4704555623`.
 
@@ -9,10 +9,12 @@ Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSMo
 | File | |
 |---|---|
 | `export_e2e_coreml.py` | The exporter as run: eliza's, with the changes below |
-| `LICENSE-elizaOS-eliza` | eliza's MIT license, which covers `export_e2e_coreml.py` |
+| `LICENSE-elizaOS-eliza` | eliza's MIT license, which covers `export_e2e_coreml.py` and the eliza reference in `check_native_lstm.py` |
 | `export_e2e_coreml.local.patch` | The same changes as a diff against eliza's file (`patch -p1`) |
 | `custom_stft.coreml.patch` | eliza's patch to mattmireles' `kokoro/custom_stft.py` |
+| `check_native_lstm.py` | The native LSTMs (change 8) vs PyTorch's packed sequences and eliza's unrolled version, for all six LSTMs at every window length |
 | `parity_coreml.py` | CoreML vs torch: durations, waveform and spectral parity, on `CPU_ONLY` and `CPU_AND_NE` |
+| `load_time.py` | Op count and cold / warm Core ML load time of a compiled graph |
 | `diag_coreml.py` | Where CoreML diverges: F0, harmonic source, audio |
 | `diag_decoder.py` | Per decoder / vocoder stage under a precision: NaN, inf, magnitude, correlation with torch |
 | `diag_sinegen.py` | Inside the harmonic source: rad, resampled and cumulative phase, sin, sine waves, voiced mask |
@@ -26,7 +28,7 @@ Recipe for exporting Kokoro-82M as one end-to-end CoreML graph that `KokoroTTSMo
 
 ## The local changes
 
-All of them are needed with coremltools 8.3 on macOS 27:
+Changes 1-7 are needed with coremltools 8.3 on macOS 27; change 8 makes the graphs load quickly:
 
 1. **The harmonic source.** `(f0 / sr) % 1` converts wrongly and zeroes it; the patch uses `x - floor(x)`, the same value.
 2. **The masked AdaIN's frame mask.** It is stretched with `F.interpolate(mode="nearest")`, which converts to an integer-scale upsample one sample short; the patch uses a constant-index `index_select`.
@@ -35,6 +37,16 @@ All of them are needed with coremltools 8.3 on macOS 27:
 5. **`--precision fp16dec`.** Everything up to the decoder input (the `asr` alignment matmul: BERT, every masked LSTM, the duration head, the F0/N predictor, the text encoder) stays fp32. The decoder and vocoder run in fp16, except the kept axes. Use `KOKORO_FP32_AXES=9,11` to also keep the vocoder's STFT bins (n_fft 20) in fp32.
 6. **The masked AdaIN statistics are made fp16-safe**, with identical math. They are means divided by the valid fraction rather than sums divided by a count, since a sum over 24,001 samples overflows fp16. The variance is taken on `(x - mean) / 16`.
 7. **`--skip-load`** saves without loading. The first Neural Engine compile of an fp16 graph can take hours, so parity runs with `parity_coreml.py ... cpu`.
+8. **Native LSTMs.** eliza's `MaskedBidirectionalLSTM` unrolls all six bidirectional LSTMs one step at a time, so each step becomes its own Core ML ops, and Core ML's first load slows down as the op count grows. The patch runs each direction as one native `lstm` op. The forward direction runs over the whole padded sequence, which leaves the valid steps unchanged because the padding comes last. The backward direction reverses each sequence's valid steps in place with a `gather`, runs, and is put back in order with the same indices. Padded steps are zeroed, as before. `check_native_lstm.py` finds the outputs within 1.7e-6 of PyTorch's packed sequences, and `parity_coreml.py` gives the same durations and audio parity as before. On a Mac, CPU only: ops and cold load from `load_time.py`, time per pass from `parity_coreml.py ... cpu`:
+
+   | Graph | Ops before | Ops after | Cold load before | Cold load after | Pass before | Pass after |
+   |---|---|---|---|---|---|---|
+   | 5 s fp32 | 49,809 | 4,855 | 9.9 s | 0.4 s | 265 ms | 273 ms |
+   | 5 s fp16dec | 50,008 | 5,001 | 10.9 s | 0.5 s | 195 ms | 197 ms |
+   | 10 s fp16dec | 72,128 | 5,001 | 28.4 s | 0.4 s | 580 ms | 416 ms |
+   | 15 s fp16dec | 105,031 | 5,001 | 53.7 s | 0.5 s | 888 ms | 654 ms |
+
+   The op count no longer grows with the window.
 
 ## Run
 
@@ -43,10 +55,12 @@ Python 3.12 with torch 2.5.0, coremltools 8.3.0, numpy 1.26.4, transformers 4.44
 ```bash
 export KOKORO_COREML_REF=<mattmireles checkout, with checkpoints/config.json and checkpoints/kokoro-v1_0.pth>
 export KOKORO_COREML_HEXGRAD=<hexgrad/Kokoro-82M download, with voices/af_heart.pt>
+python check_native_lstm.py export_e2e_coreml.py                                 # native LSTMs == packed
 python export_e2e_coreml.py --stage torch --seconds 5 --tokens 128               # torch parity only
 python export_e2e_coreml.py --stage full --seconds 5 --tokens 128 --precision fp32 --out out/fp32
 python parity_coreml.py export_e2e_coreml.py out/fp32/kokoro_5s.mlpackage
 xcrun coremlcompiler compile out/fp32/kokoro_5s.mlpackage out/fp32/
+python load_time.py out/fp32/kokoro_5s.mlmodelc                                  # op count, cold load
 
 # fp16 decoder (fp32 text side, phase path and STFT):
 KOKORO_FP32_AXES=9,11 python export_e2e_coreml.py --stage full --seconds 5 --tokens 128 \
