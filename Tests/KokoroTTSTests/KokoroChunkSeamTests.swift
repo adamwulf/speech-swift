@@ -65,10 +65,32 @@ final class KokoroChunkSeamTests: XCTestCase {
                                speed: speed, sampleRate: rate)
     }
 
-    func testFirstPieceKeepsItsLeadIn() {
+    func testFirstPieceLeadInIsCutToAHundredMilliseconds() {
         let k = keeps(nil, "So the next useful step is for you")
-        XCTAssertNil(k.leading)
+        XCTAssertEqual(k.leading, 2400)
         XCTAssertEqual(k.trailing, 240)
+        XCTAssertEqual(keeps(nil, "Yes.", final: true).leading, 2400)
+        XCTAssertEqual(keeps(nil, "Yes.", final: true, speed: 1.25).leading, 1920)
+    }
+
+    func testShortLeadInIsLeftAlone() {
+        // A lead-in already under 100 ms (BOS 1's usual) is not cut.
+        let audio = silence(ms: 75) + tone(ms: 300) + silence(ms: 200)
+        let k = keeps(nil, "Yes.", final: true)
+        let out = KokoroChunkSeams.trim(audio, keepLeading: k.leading, keepTrailing: k.trailing)
+        XCTAssertEqual(out, audio)
+    }
+
+    func testLongLeadInIsCut() {
+        // BOS 0's ~450 ms lead-in before a short reply comes out at ~100 ms.
+        let audio = noise(ms: 450, rms: 0.0005) + tone(ms: 300) + silence(ms: 200)
+        let k = keeps(nil, "Yes.", final: true)
+        let out = KokoroChunkSeams.trim(audio, keepLeading: k.leading, keepTrailing: k.trailing)
+        let cut = audio.count - out.count
+        let window = KokoroChunkSeams.windowSamples
+        XCTAssertTrue(((samples(ms: 350) - window)...samples(ms: 350)).contains(cut), "\(cut)")
+        XCTAssertEqual(Array(out.suffix(samples(ms: 500))), Array(audio.suffix(samples(ms: 500))),
+                       "speech and tail are untouched")
     }
 
     func testMiddlePieceIsTrimmedByTheTextOnEachSide() {
@@ -146,9 +168,10 @@ final class KokoroChunkSeamTests: XCTestCase {
         let hop = KokoroChunkSeams.hopSamples, window = KokoroChunkSeams.windowSamples
         let lead = emitted.map { leadingZeros($0.audio) }
         let tail = emitted.map { trailingZeros($0.audio) }
-        // First piece: the utterance's lead-in is left alone; its tail before
-        // a word cut is trimmed.
-        XCTAssertEqual(lead[0], samples(ms: 300))
+        // First piece: the utterance's 300 ms lead-in is cut to about 100 ms;
+        // its tail before a word cut is trimmed.
+        let leadIn = samples(ms: 100)
+        XCTAssertTrue((leadIn...(leadIn + hop)).contains(lead[0]), "\(lead[0])")
         XCTAssertEqual(emitted[0].audio[lead[0]], framed[samples(ms: 300)])
         XCTAssertTrue((word...(word + window)).contains(tail[0]), "\(tail[0])")
         // First retry piece: faded in, and trimmed by its own text, a word

@@ -33,6 +33,8 @@ tokenizer_spm_32k_3.model
 *-8bit*/
 *-bf16*/
 *-coreml*/
+# The canonical Hugging Face model card source, not a model directory
+!scripts/kokoro_coreml_export/huggingface/Kokoro-82M-CoreML-Masked/
 
 # Generated test audio (PersonaPlex output artifacts)
 Tests/**/test_audio_response.wav

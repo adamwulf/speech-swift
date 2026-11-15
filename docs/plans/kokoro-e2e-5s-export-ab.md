@@ -25,7 +25,7 @@ The exported graph, called X below, passes if:
 The harness from the warble investigation is committed. It has two parts:
 
 - `E2EKokoroListeningSetTests` in `Tests/KokoroTTSTests/KokoroListeningSetE2ETests.swift`. It renders WAVs and prints render times and pitch stability for each configuration and text.
-- Three internal switches used only by listening tests: `KokoroNetwork.experimentZeroPhases`, `KokoroTTSModel.experimentBoundaryId` and `KokoroTTSModel.experimentAveragedVoice`.
+- Three internal switches used only by listening tests: `KokoroNetwork.experimentZeroPhases`, `KokoroTTSModel.experimentBoundaryId` (since made public as `boundaryTokenId`) and `KokoroTTSModel.experimentAveragedVoice`.
 
 The test skips unless `KOKORO_LISTENING_DIR` is set. With `KOKORO_AB_BUNDLE_DIR` also set, it renders this plan's A/B set from that folder (Step 5) instead of the warble set. If the A/B shows that BOS / EOS = 0 matters, replace the switch with a real per-bundle option in a separate change.
 

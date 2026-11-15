@@ -175,7 +175,7 @@ The larger graph is faster for long sentences and slower for short replies. Load
 
 `voiceFilter` takes shell patterns on voice ids (`a*`, `bf_emma`) and limits both which `voices/<id>.json` files are downloaded and which are loaded from the cache. `nil`, the default, takes every voice.
 
-`milestonemade/Kokoro-82M-CoreML-Masked` holds end-to-end exports whose LSTMs ignore the input padding, made with the recipe in `scripts/kokoro_coreml_export/`. All of them take `speed`, and they share aufklarer's vocabulary, G2P and voices:
+`milestonemade/Kokoro-82M-CoreML-Masked` holds end-to-end exports whose LSTMs ignore the input padding, made with the recipe in `scripts/kokoro_coreml_export/`. All of them take `speed`. They share aufklarer's vocabulary and G2P, and its voices with the per-length style rows added (see below):
 
 | `modelFile` | Phoneme slots | Output window | Budget | Hard cap |
 |---|---|---|---|---|
@@ -185,6 +185,14 @@ The larger graph is faster for long sentences and slower for short replies. Load
 | `kokoro_masked_15s_fp16` | 249 | 360 000 samples (15.0 s) | 194 | 222 |
 
 Load the fp16 models with `computeUnits: .cpuOnly`. With `.cpuAndNeuralEngine`, the first load runs a Neural Engine compile of over an hour, and each pass is about 5 times slower. Blind listening and measurements are in [the research notes](../research/2026-11-13-kokoro-long-window-and-exporters.md).
+
+Three settings shape short replies:
+
+- **Per-length voice rows.** Kokoro's style vector depends on the utterance's length. This repository's voice files carry the 510 rows from hexgrad's voice tensors, about 2.7 MB per voice, and `KokoroVoice` picks `rows[phonemes - 1]` for each chunk. A voice file with only the mean `embedding`, like aufklarer's, falls back to that mean. The mean is close to the long-utterance rows but far from the short ones (cosine 0.49 at 5 phonemes), so short replies sound different with it.
+- **Boundary token 0.** `boundaryTokenId` replaces the phonemizer's BOS 1 and EOS 2 with this id; upstream Kokoro uses 0. `fromPretrained` sets 0 for `kokoro_masked_*` and leaves other graphs at 1 and 2 (`defaultBoundaryTokenId(forModelFile:)`). With 0, the start token's predicted lead-in grows to about 450 ms before a short reply, and its first sound comes out cleaner. In blind listening with rows, 0 was preferred three times, 1/2 once, with four ties.
+- **Lead-in cut.** The utterance's lead-in, before the first piece's speech, is cut to 100 ms (`KokoroChunkSeams.leadInSeconds`, scaled by speed). It removes the extra wait boundary token 0 adds; with BOS 1 the lead-in is usually already shorter.
+
+Pass `voiceFilter` to download and parse only the voices in use.
 
 ## Phonemizer
 

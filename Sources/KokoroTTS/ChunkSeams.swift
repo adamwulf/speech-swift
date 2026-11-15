@@ -9,7 +9,8 @@ import Foundation
 /// before a seam does not end a sentence, the silence on both sides is cut
 /// down to no more than Kokoro leaves inside one chunk: about a gap between
 /// words after a cut between words, and less than its own comma pause after
-/// `,` `;` `:`. Sentence ends keep the model's own pause.
+/// `,` `;` `:`. Sentence ends keep the model's own pause. The utterance's
+/// own lead-in, before the first piece, is cut to about 100 ms.
 enum KokoroChunkSeams {
 
     /// What ends the text before a seam.
@@ -27,6 +28,11 @@ enum KokoroChunkSeams {
     /// together. It is kept shorter than Kokoro's own comma pause inside one
     /// chunk, measured at 210-275 ms at speed 1 (165-210 ms at speed 1.2).
     static let clauseGapSeconds = 0.160
+    /// Lead-in silence kept before the first piece's speech at speed 1. With
+    /// BOS/EOS 0 the start token's lead-in grows to about 450 ms on a short
+    /// reply; cutting it keeps the model's onset without the wait. With BOS
+    /// 1 the lead-in is already about 75-125 ms, so this rarely cuts.
+    static let leadInSeconds = 0.100
     /// A 10 ms window below this RMS is silence. The graph's lead-in sits
     /// under 0.001; soft onsets and endings (h, f, s, th) rise above this
     /// within a window or two, and the kept silence covers the rest.
@@ -69,12 +75,13 @@ enum KokoroChunkSeams {
     }
 
     /// Samples of silence one rendered piece keeps at each end. `leading`
-    /// follows from the text of the piece before it and is nil for the first
-    /// piece, whose lead-in starts the utterance; `trailing` follows from the
-    /// piece's own text and is nil for the final piece, whose tail ends it.
-    /// Either is also nil at a sentence end. Pieces of an overflow retry are
-    /// handled like any other piece, by their own text. Nil leaves that end
-    /// as rendered.
+    /// follows from the text of the piece before it; for the first piece,
+    /// whose lead-in starts the utterance, it is `leadInSeconds`. `trailing`
+    /// follows from the piece's own text and is nil for the final piece,
+    /// whose tail ends it. Either is nil after a sentence end. Pieces of an
+    /// overflow retry are handled like any other piece, by their own text.
+    /// Nil leaves that end as rendered. Faster speech keeps proportionally
+    /// less.
     static func keeps(
         previousText: String?,
         text: String,
@@ -82,7 +89,12 @@ enum KokoroChunkSeams {
         speed: Float,
         sampleRate: Int
     ) -> (leading: Int?, trailing: Int?) {
-        let leading = previousText.flatMap { keptSilence(after: $0, speed: speed, sampleRate: sampleRate) }
+        let leading: Int?
+        if let previousText {
+            leading = keptSilence(after: previousText, speed: speed, sampleRate: sampleRate)
+        } else {
+            leading = Int((leadInSeconds / Double(max(speed, 0.1)) * Double(sampleRate)).rounded())
+        }
         let trailing = isFinal ? nil : keptSilence(after: text, speed: speed, sampleRate: sampleRate)
         return (leading, trailing)
     }

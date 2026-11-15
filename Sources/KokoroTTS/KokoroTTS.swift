@@ -43,9 +43,18 @@ public final class KokoroTTSModel {
     var voices: [String: KokoroVoice]
     /// Chunk sizes for the loaded graph's input slots and output window.
     let chunkBudget: KokoroChunkBudget
-    /// Listening tests only: send this id in place of BOS and EOS (upstream
-    /// Kokoro uses 0 for both; the phonemizer emits 1 and 2).
-    var experimentBoundaryId: Int?
+    /// The token sent in place of BOS and EOS, or nil to keep the
+    /// phonemizer's 1 and 2. Upstream Kokoro uses 0 for both. With 0, the
+    /// start token gets a longer predicted lead-in and a short reply's onset
+    /// comes out cleaner. `fromPretrained` sets 0 for the masked exports
+    /// (`kokoro_masked_*`), where blind listening preferred it with
+    /// per-length voice rows, and leaves other graphs at 1 and 2.
+    public var boundaryTokenId: Int?
+    /// The boundary token `fromPretrained` uses for a model file: 0 for the
+    /// masked exports, nil (BOS 1, EOS 2) for every other graph.
+    public static func defaultBoundaryTokenId(forModelFile modelFile: String) -> Int? {
+        modelFile.hasPrefix("kokoro_masked") ? 0 : nil
+    }
     /// Listening tests only: use a voice's averaged `embedding` even when
     /// its file has per-length rows.
     var experimentAveragedVoice = false
@@ -253,7 +262,7 @@ public final class KokoroTTSModel {
         speed: Float
     ) throws -> (audio: [Float], overran: Bool) {
         var tokenIds = tokenIds
-        if let boundary = experimentBoundaryId, tokenIds.count >= 2 {
+        if let boundary = boundaryTokenId, tokenIds.count >= 2 {
             tokenIds[0] = boundary
             tokenIds[tokenIds.count - 1] = boundary
         }
@@ -504,6 +513,7 @@ public final class KokoroTTSModel {
         let model = KokoroTTSModel(
             config: KokoroConfig(maxPhonemeLength: network.inputSlots), network: network,
             phonemizer: phonemizer, voices: voices)
+        model.boundaryTokenId = defaultBoundaryTokenId(forModelFile: modelFile)
 
         // The first prediction pays CoreML's one-time setup; take it here
         // rather than on the caller's first reply.

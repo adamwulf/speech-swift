@@ -164,7 +164,7 @@ final class E2EKokoroListeningSetTests: XCTestCase {
             }
             guard let m = model, let network = m.network else { return XCTFail("not loaded") }
             network.experimentZeroPhases = config.zeroPhases
-            m.experimentBoundaryId = config.boundary
+            m.boundaryTokenId = config.boundary
             m.experimentAveragedVoice = config.averaged
             print("LISTEN \(config.name): slots \(network.inputSlots), output \(network.outputSamples), speed input \(network.acceptsSpeed), budget \(m.chunkBudget)")
 
