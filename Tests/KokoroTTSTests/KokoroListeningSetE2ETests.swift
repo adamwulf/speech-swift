@@ -22,8 +22,9 @@ import AudioCommon
 ///   exports (`kokoro_eliza_{10,15}s_{fp32,fp16}.mlmodelc`) in one pass. The
 ///   fp16 graphs load with `.cpuOnly`, where they run fastest.
 ///
-/// The A/B set also renders FluidInference's `kokoro_21_5s` (downloaded) and
-/// the 10 s / 15 s fp16 exports for comparison. `KOKORO_LISTENING_CONFIGS` (comma-separated config names)
+/// The A/B set also renders FluidInference's `kokoro_21_5s` and
+/// `kokoro_21_15s` (downloaded) and the 10 s / 15 s fp16 exports for
+/// comparison. `KOKORO_LISTENING_CONFIGS` (comma-separated config names)
 /// limits a run to those configurations.
 ///
 /// Run with: KOKORO_LISTENING_DIR=/path swift test --filter E2EKokoroListeningSetTests
@@ -93,6 +94,7 @@ final class E2EKokoroListeningSetTests: XCTestCase {
             Config(name: "X3c_eliza-5s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuOnly, cacheDir: dir),
             Config(name: "X4_eliza-5s-fp16_pad0", modelId: local, modelFile: "kokoro_eliza_5s_fp16", units: .cpuAndNeuralEngine, boundary: 0, cacheDir: dir),
             Config(name: "H1_fluid-5s_ane", modelId: fluid, modelFile: "kokoro_21_5s", units: .cpuAndNeuralEngine),
+            Config(name: "B_fluid-15s_ane", modelId: fluid, modelFile: "kokoro_21_15s", units: .cpuAndNeuralEngine),
             Config(name: "L10h_eliza-10s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_10s_fp16", units: .cpuOnly, cacheDir: dir),
             Config(name: "L15h_eliza-15s-fp16_cpu", modelId: local, modelFile: "kokoro_eliza_15s_fp16", units: .cpuOnly, cacheDir: dir),
         ]
